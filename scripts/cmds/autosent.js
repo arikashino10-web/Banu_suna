@@ -13,7 +13,9 @@ let WHITELIST = [
 function loadWhitelist() {
   try {
     if (fs.existsSync(WHITELIST_PATH)) {
-      WHITELIST = JSON.parse(fs.readFileSync(WHITELIST_PATH, "utf8"));
+      const loaded = JSON.parse(fs.readFileSync(WHITELIST_PATH, "utf8"));
+      if (!Array.isArray(loaded)) throw new Error("Whitelist must be an array");
+      WHITELIST = loaded.map(id => String(id).trim()).filter(Boolean);
     } else {
       saveWhitelist();
     }
@@ -43,6 +45,11 @@ module.exports = {
   onStart: async function ({ api, event, args }) {
     const threadID = event.threadID;
     const input = (args[0] || "").toLowerCase();
+
+    const ownerIDs = ["61576355017916", "100082814982394", "100089047474463"];
+    if (["add", "remove", "list", "test"].includes(input) && !ownerIDs.includes(String(event.senderID))) {
+      return api.sendMessage("🔒 এই autosent command শুধু অনুমোদিত owner ব্যবহার করতে পারবেন।", threadID);
+    }
 
     // ===== HELP =====
     if (input === "help" || input === "") {
@@ -257,11 +264,13 @@ module.exports = {
 
       const bd = new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" });
       const now = new Date(bd);
-      const hm = `\( {String(now.getHours()).padStart(2, "0")}: \){String(now.getMinutes()).padStart(2, "0")}`;
+      const hm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const sentKey = dateKey + " " + hm;
 
       // ১. মেইন মেসেজ (প্রতি ২ ঘণ্টা)
-      if (schedule[hm] && global.autosentData.lastSent !== hm) {
-        global.autosentData.lastSent = hm;
+      if (schedule[hm] && global.autosentData.lastSent !== sentKey) {
+        global.autosentData.lastSent = sentKey;
         const list = schedule[hm].texts;
         if (!global.autosentData.msgIndex[hm]) global.autosentData.msgIndex[hm] = 0;
         const idx = global.autosentData.msgIndex[hm] % list.length;
@@ -275,8 +284,8 @@ module.exports = {
       }
 
       // ২. ডেইলি রিপোর্ট (00:05)
-      if (hm === "00:05" && global.autosentData.lastReport !== hm) {
-        global.autosentData.lastReport = hm;
+      if (hm === "00:05" && global.autosentData.lastReport !== dateKey) {
+        global.autosentData.lastReport = dateKey;
         for (const id of WHITELIST) {
           const count = global.autosentData.dailyMessages[id] || 0;
           api.sendMessage(
