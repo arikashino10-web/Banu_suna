@@ -1,156 +1,111 @@
 /**
- * AI AGENT — Super Smart Group Assistant with Agent Capabilities
+ * GROUP AI — Owner Only
+ * 🔒 সবকিছুই শুধুমাত্র Owner-এর জন্য
  * 
- * Features:
- * - Context Understanding
- * - Intent Detection
- * - Multi-step Reasoning
- * - Auto-suggestion
- * - Data Analysis
- * - Smart Search
+ * Owners: 61576355017916, 100082814982394
  */
 
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 
-// ─── Memory Configuration ──────────────────────────────────────────────────
+// ─── 🔒 OWNER ONLY ──────────────────────────────────────────────────────────
+const ALLOWED_USERS = ["61576355017916", "100082814982394"];
+const ROOT = process.cwd();
+
+// ─── 📁 BLOCKED FILES ──────────────────────────────────────────────────────
+const BLOCKED_NAMES = new Set([
+  ".env", ".env.local", ".env.production", 
+  "account.txt", "cookies.json", "appstate.json", 
+  "token.txt", "config.json", "credentials.json"
+]);
+
+// ─── 💾 MEMORY ──────────────────────────────────────────────────────────────
+const MEMORY_FILE = path.join(__dirname, "cache", "groupai_memory.json");
 const memory = new Map();
-const MEMORY_FILE = path.join(__dirname, "cache", "ai_agent.json");
-const MAX_MSGS = 300;
-const MAX_EVENTS = 150;
-const MAX_MEMBERS = 200;
-
-function saveMemory() {
-  try {
-    const obj = {};
-    for (const [tid, data] of memory.entries()) {
-      obj[tid] = {
-        members: data.members,
-        messages: data.messages.slice(-60),
-        events: data.events.slice(-40),
-        language: data.language || "bangla",
-        personality: data.personality || "assistant",
-        threadName: data.threadName || null,
-        created: data.created || Date.now(),
-        messageCount: data.messageCount || 0,
-        activeMembers: data.activeMembers || {},
-        topics: data.topics || {},
-        lastSummary: data.lastSummary || null
-      };
-    }
-    fs.ensureDirSync(path.dirname(MEMORY_FILE));
-    fs.writeJsonSync(MEMORY_FILE, obj, { spaces: 2 });
-  } catch (e) {}
-}
 
 function loadMemory() {
   try {
     if (!fs.existsSync(MEMORY_FILE)) return;
-    const obj = fs.readJsonSync(MEMORY_FILE);
-    for (const [tid, data] of Object.entries(obj)) {
-      memory.set(tid, {
-        members: data.members || {},
-        messages: data.messages || [],
-        events: data.events || [],
-        language: data.language || "bangla",
-        personality: data.personality || "assistant",
-        threadName: data.threadName || null,
-        created: data.created || Date.now(),
-        messageCount: data.messageCount || 0,
-        activeMembers: data.activeMembers || {},
-        topics: data.topics || {},
-        lastSummary: data.lastSummary || null
+    const data = fs.readJsonSync(MEMORY_FILE);
+    for (const [threadID, value] of Object.entries(data)) {
+      memory.set(threadID, {
+        messages: Array.isArray(value.messages) ? value.messages.slice(-100) : [],
+        members: value.members || {}
       });
     }
-  } catch (e) {}
+  } catch (error) {
+    console.error("GroupAI memory load error:", error.message);
+  }
 }
 
-loadMemory();
+function saveMemory() {
+  try {
+    fs.ensureDirSync(path.dirname(MEMORY_FILE));
+    const data = {};
+    for (const [threadID, value] of memory.entries()) {
+      data[threadID] = {
+        messages: (value.messages || []).slice(-100),
+        members: value.members || {}
+      };
+    }
+    fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 });
+  } catch (error) {
+    console.error("GroupAI memory save error:", error.message);
+  }
+}
 
-// ─── Helper Functions ──────────────────────────────────────────────────────
 function getThread(threadID) {
   if (!memory.has(threadID)) {
-    memory.set(threadID, {
-      members: {},
-      messages: [],
-      events: [],
-      language: "bangla",
-      personality: "assistant",
-      threadName: null,
-      created: Date.now(),
-      messageCount: 0,
-      activeMembers: {},
-      topics: {},
-      lastSummary: null
-    });
+    memory.set(threadID, { messages: [], members: {} });
   }
   return memory.get(threadID);
 }
 
-function addMessage(threadID, name, body, id) {
-  const th = getThread(threadID);
-  const time = new Date().toLocaleTimeString("en-US", { 
-    hour: "2-digit", 
-    minute: "2-digit",
-    hour12: true 
-  });
-  
-  th.messageCount = (th.messageCount || 0) + 1;
-  th.activeMembers[name] = (th.activeMembers[name] || 0) + 1;
-  
-  th.messages.push({ 
-    name, 
-    body: body.slice(0, 500), 
-    time, 
-    id,
-    timestamp: Date.now()
-  });
-  
-  if (th.messages.length > MAX_MSGS) th.messages.shift();
-
-  // Topic extraction
-  const words = body.toLowerCase().split(/\s+/);
-  for (const word of words) {
-    if (word.length > 3) {
-      th.topics[word] = (th.topics[word] || 0) + 1;
-    }
-  }
-
-  // Event detection
-  const lower = body.toLowerCase();
-  const eventKeywords = {
-    negative: ["খারাপ", "গালি", "মারামারি", "ঝগড়া", "বিরক্ত", "ঘৃণা", "শপথ", "অভিশাপ", "ধমক", "hate", "fight", "argue", "angry", "upset", "swear", "curse", "threat", "abuse", "يكره", "أكره", "غاضب", "زعلان", "شتم", "مشكلة", "خناق", "خصام", "تشاجر"],
-    positive: ["ভালোবাসি", "ভালো", "মজা", "হাসি", "সুখী", "ধন্যবাদ", "love", "happy", "thanks", "good", "nice", "great", "awesome", "يحب", "مبروك", "تهانينا", "شكرا", "حلو"],
-    question: ["কি", "কে", "কেন", "কখন", "কেমন", "কত", "what", "who", "why", "when", "how", "which", "where", "what", "why", "when", "how", "which", "where"]
-  };
-  
-  for (const [type, keywords] of Object.entries(eventKeywords)) {
-    if (keywords.some(k => lower.includes(k))) {
-      th.events.push({ 
-        who: name, 
-        what: body.slice(0, 300), 
-        time,
-        type: type,
-        timestamp: Date.now()
-      });
-      if (th.events.length > MAX_EVENTS) th.events.shift();
-      break;
-    }
-  }
-  
+function addMessage(threadID, name, body) {
+  const thread = getThread(threadID);
+  thread.messages.push({ name, body: String(body).slice(0, 2000), time: Date.now() });
+  thread.messages = thread.messages.slice(-100);
   saveMemory();
 }
 
-function detectLanguage(text) {
-  const hasBengali = /[\u0980-\u09FF]/.test(text);
-  const hasArabic = /[\u0600-\u06FF]/.test(text);
-  if (hasBengali) return "bangla";
-  if (hasArabic) return "arabic";
-  return "english";
+// ─── 🔒 OWNER CHECK ──────────────────────────────────────────────────────
+function isOwner(senderID) {
+  return ALLOWED_USERS.includes(String(senderID));
 }
 
-// ─── AI Call (Agent Mode) ─────────────────────────────────────────────────
+function safePath(input) {
+  const raw = String(input || "").trim();
+  if (!raw || raw.includes("\0")) throw new Error("Invalid file path");
+  const fullPath = path.resolve(ROOT, raw);
+  if (fullPath !== ROOT && !fullPath.startsWith(ROOT + path.sep)) {
+    throw new Error("শুধু project folder-এর ভেতরের ফাইল ব্যবহার করা যাবে");
+  }
+  const name = path.basename(fullPath).toLowerCase();
+  if (BLOCKED_NAMES.has(name) || name.includes("cookie") || name.includes("token") || name.includes("secret")) {
+    throw new Error("এই ধরনের sensitive file access করা যাবে না");
+  }
+  return fullPath;
+}
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return [days ? days + "d" : "", hours ? hours + "h" : "", minutes + "m"].filter(Boolean).join(" ") || "0m";
+}
+
+function detectLanguage(text) {
+  if (/[\u0980-\u09FF]/.test(text)) return "Bangla";
+  if (/[\u0900-\u097F]/.test(text)) return "Hindi";
+  if (/[\u0600-\u06FF]/.test(text)) return "Arabic/Urdu";
+  return "English";
+}
+
+// ─── 🤖 AI CALL ──────────────────────────────────────────────────────────
 async function askAI(systemPrompt, userMessage) {
   try {
     const response = await axios.post(
@@ -161,375 +116,412 @@ async function askAI(systemPrompt, userMessage) {
           { role: "user", content: userMessage }
         ],
         model: "openai",
-        seed: Math.floor(Math.random() * 9999),
         private: true
       },
-      { 
-        timeout: 40000,
-        headers: { "Content-Type": "application/json" } 
-      }
+      { timeout: 60000, headers: { "Content-Type": "application/json" } }
     );
-
-    if (typeof response.data === "string") return response.data.trim();
-    return (
-      response.data?.choices?.[0]?.message?.content ||
-      response.data?.response ||
-      null
-    ).trim();
-  } catch (e) {
-    console.error("AI Error:", e.message);
+    return response.data?.choices?.[0]?.message?.content || response.data?.response || null;
+  } catch (error) {
+    console.error("GroupAI API error:", error.message);
     return null;
   }
 }
 
-// ─── Agent Functions ──────────────────────────────────────────────────────
-async function agentProcess(question, th, senderName, lang) {
-  // 1. Detect intent
-  const intent = detectIntent(question, th);
-  
-  // 2. Build context
-  const context = buildContext(th, lang);
-  
-  // 3. Generate response
-  const response = await generateAgentResponse(question, context, intent, th, senderName, lang);
-  
-  // 4. Post-process
-  return postProcessResponse(response, intent, th);
+// ─── 📱 FACEBOOK API ──────────────────────────────────────────────────────
+async function getFacebookApi() {
+  const api = global.GoatBot?.fcaApi || global.api;
+  return api || null;
 }
 
-function detectIntent(question, th) {
-  const lower = question.toLowerCase();
-  
-  if (lower.includes("কি") || lower.includes("কেমন") || lower.includes("কত") || 
-      lower.includes("what") || lower.includes("how") || lower.includes("why")) {
-    return "information";
+// ─── 🐙 GITHUB ─────────────────────────────────────────────────────────────
+async function githubRequest(repoURL, filePath) {
+  const match = String(repoURL || "").match(/^https?:\/\/github\.com\/([^/]+)\/([^/?#]+)/i);
+  if (!match) throw new Error("সঠিক GitHub URL দিন");
+  const owner = match[1];
+  const repo = match[2].replace(/\.git$/, "");
+  let endpoint = "https://api.github.com/repos/" + owner + "/" + repo + "/contents";
+  if (filePath) {
+    const encodedPath = String(filePath).split("/").map(part => encodeURIComponent(part)).join("/");
+    endpoint += "/" + encodedPath;
   }
-  
-  if (lower.includes("সাহায্য") || lower.includes("help") || lower.includes("help") ||
-      lower.includes("দরকার") || lower.includes("need")) {
-    return "help";
-  }
-  
-  if (lower.includes("মতামত") || lower.includes("opinion") || lower.includes("opinion") ||
-      lower.includes("ভালো") || lower.includes("খারাপ") || lower.includes("good") || lower.includes("bad")) {
-    return "opinion";
-  }
-  
-  if (lower.includes("গ্রুপ") || lower.includes("সদস্য") || lower.includes("group") || 
-      lower.includes("member") || lower.includes("তুমি") || lower.includes("আমি")) {
-    return "social";
-  }
-  
-  return "general";
+  const response = await axios.get(endpoint, { 
+    timeout: 30000, 
+    headers: { "User-Agent": "GroupAI-GoatBot" } 
+  });
+  return { owner, repo, data: response.data };
 }
 
-function buildContext(th, lang) {
-  const memberList = Object.values(th.members)
-    .filter(Boolean)
-    .slice(0, 30)
-    .join("، ");
+// ─── 📋 HELP MESSAGE ──────────────────────────────────────────────────────
+function helpMessage() {
+  return `👑 **GROUP AI COMMAND** (🔒 Owner Only)
 
-  const recentConvo = th.messages.slice(-15)
-    .map(m => `[${m.time}] ${m.name}: ${m.body.slice(0, 100)}`)
-    .join("\n");
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💬 **AI Assistant:**
+.groupai <প্রশ্ন> — যে কোনো ভাষায়
 
-  const recentEvents = th.events.slice(-5)
-    .map(e => `• ${e.time} — ${e.who}: ${e.what.slice(0, 80)}`)
-    .join("\n");
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📂 **File Operations:**
+.groupai read <file> — ফাইল পড়ুন
+.groupai write <file> <text> — ফাইল লিখুন
+.groupai edit <file> <old> => <new> — ফাইল edit করুন
+.groupai delete <file> confirm — ফাইল delete করুন
+.groupai list [folder] — ফাইল list করুন
+.groupai check <file.js> — syntax check করুন
 
-  const topTopics = Object.entries(th.topics || {})
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([topic, count]) => `${topic} (${count} বার)`)
-    .join(", ");
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🐙 **GitHub:**
+.groupai github <repo-url> [path] — GitHub repo/file পড়ুন
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📱 **Facebook:**
+.groupai fb post <text> — পোস্ট করুন
+.groupai fb like <post_id> — লাইক দিন
+.groupai fb comment <post_id> <text> — কমেন্ট করুন
+.groupai fb read <thread_id> [limit] — পোস্ট পড়ুন
+.groupai fb info [uid] — ইউজার ইনফো
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **System Analysis:**
+.groupai status — স্ট্যাটাস
+.groupai analyze — অ্যানালাইসিস
+.groupai predict — প্রেডিক্ট
+.groupai problems — সমস্যা
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👑 **Owners:** ${ALLOWED_USERS.join(", ")}
+🔒 **Everyone else:** Access Denied!`;
+}
+
+// ─── 📂 FILE COMMANDS ──────────────────────────────────────────────────
+async function runFileCommand(command, args) {
+  const filePath = safePath(args[1]);
+  
+  if (command === "read") {
+    if (!(await fs.pathExists(filePath))) throw new Error("ফাইল পাওয়া যায়নি");
+    const content = await fs.readFile(filePath, "utf8");
+    return "📄 " + filePath + "\n\n" + content.slice(0, 15000);
+  }
+  
+  if (command === "write") {
+    const content = args.slice(2).join(" ");
+    if (!content) throw new Error("লেখার content দিন");
+    await fs.ensureDir(path.dirname(filePath));
+    await fs.writeFile(filePath, content, "utf8");
+    return "✅ ফাইল লেখা হয়েছে: " + filePath;
+  }
+  
+  if (command === "edit") {
+    const raw = args.slice(2).join(" ");
+    const separator = raw.indexOf("=>");
+    if (separator < 0) throw new Error("Format: edit <file> <old> => <new>");
+    const oldText = raw.slice(0, separator).trim();
+    const newText = raw.slice(separator + 2).trim();
+    if (!oldText) throw new Error("পুরনো text দিন");
+    const content = await fs.readFile(filePath, "utf8");
+    if (!content.includes(oldText)) throw new Error("পুরনো text পাওয়া যায়নি");
+    await fs.writeFile(filePath, content.split(oldText).join(newText), "utf8");
+    return "✅ ফাইল edit হয়েছে: " + filePath;
+  }
+  
+  if (command === "delete") {
+    if (String(args[2]).toLowerCase() !== "confirm") throw new Error("Delete করতে শেষে confirm লিখুন");
+    if (!(await fs.pathExists(filePath))) throw new Error("ফাইল পাওয়া যায়নি");
+    await fs.remove(filePath);
+    return "✅ ফাইল delete হয়েছে: " + filePath;
+  }
+  
+  if (command === "check" || command === "test") {
+    if (path.extname(filePath) !== ".js") throw new Error("শুধু .js file syntax check করা যাবে");
+    try {
+      await execFileAsync(process.execPath, ["--check", filePath], { cwd: ROOT, timeout: 30000 });
+      return "✅ JavaScript syntax ঠিক আছে: " + filePath;
+    } catch (error) {
+      return "❌ Syntax error: " + (error.stderr || error.message);
+    }
+  }
+  
+  if (command === "list" || command === "ls") {
+    const folder = await fs.readdir(filePath);
+    const items = folder.slice(0, 100).map(name => "• " + name).join("\n");
+    return "📂 " + filePath + "\n\n" + items;
+  }
+  
+  throw new Error("Unknown file command");
+}
+
+// ─── 📱 FACEBOOK COMMANDS ──────────────────────────────────────────────
+async function runFacebookCommand(args) {
+  const api = await getFacebookApi();
+  if (!api) throw new Error("Facebook API initialized নয়। APPSTATE চেক করুন।");
+  
+  const subcommand = String(args[1] || "").toLowerCase();
+  
+  if (subcommand === "post") {
+    const content = args.slice(2).join(" ");
+    if (!content) throw new Error("Post text দিন");
+    await api.sendMessage(content, api.getCurrentUserID());
+    return "✅ Facebook post পাঠানো হয়েছে!";
+  }
+  
+  if (subcommand === "like") {
+    if (!args[2]) throw new Error("Post ID দিন");
+    await api.setMessageReaction("👍", args[2]);
+    return "✅ Like দেওয়া হয়েছে: " + args[2];
+  }
+  
+  if (subcommand === "comment") {
+    const postID = args[2];
+    const content = args.slice(3).join(" ");
+    if (!postID || !content) throw new Error("Post ID এবং comment দিন");
+    await api.sendMessage(content, postID);
+    return "✅ Comment করা হয়েছে!";
+  }
+  
+  if (subcommand === "read") {
+    if (!args[2]) throw new Error("Thread ID দিন");
+    const info = await api.getThreadInfo(args[2]);
+    const messages = await api.getThreadHistory(args[2], Math.min(Number(args[3]) || 10, 30));
+    const output = messages.slice(0, 10).map(item => "• " + (item.body || "[attachment]")).join("\n");
+    return "📖 " + (info.threadName || "Thread") + "\n\n" + output;
+  }
+  
+  if (subcommand === "info") {
+    const uid = args[2] || api.getCurrentUserID();
+    const info = await api.getUserInfo(uid);
+    const user = info[uid];
+    return user ? "👤 " + (user.name || "Unknown") + "\nUID: " + uid : "User পাওয়া যায়নি";
+  }
+  
+  throw new Error("FB command: post, like, comment, read, info");
+}
+
+// ─── 💬 AI REPLY ──────────────────────────────────────────────────────────
+async function buildAIReply(threadID, senderName, question) {
+  const thread = getThread(threadID);
+  const language = detectLanguage(question);
+  const history = thread.messages.slice(-10).map(item => item.name + ": " + item.body).join("\n");
+  
+  const systemPrompt = `You are GroupAI — a helpful GoatBot assistant.
+
+LANGUAGE: ${language}
+
+RECENT CONTEXT:
+${history || "No previous conversation"}
+
+RULES:
+1. Answer in ${language}
+2. Be concise and practical
+3. Be friendly and helpful
+4. Don't claim actions you didn't perform
+5. If asked about files/FB/github, suggest the command
+
+USER: ${question}
+
+Your helpful response:`;
+
+  const answer = await askAI(systemPrompt, question);
+  addMessage(threadID, senderName, question);
+  if (answer) addMessage(threadID, "GroupAI", answer);
+  
+  return answer || "AI service এখন উত্তর দিচ্ছে না। কিছুক্ষণ পর আবার চেষ্টা করুন। 😊";
+}
+
+// ─── 📊 SYSTEM ANALYSIS ──────────────────────────────────────────────────
+async function getSystemStatus() {
+  const usage = process.memoryUsage();
+  const cmdDir = path.join(ROOT, "scripts", "cmds");
+  const commandCount = (await fs.pathExists(cmdDir)) ? 
+    (await fs.readdir(cmdDir)).filter(name => name.endsWith(".js")).length : 0;
+  
   return {
-    memberList,
-    recentConvo,
-    recentEvents,
-    topTopics,
-    totalMembers: Object.keys(th.members).length,
-    totalMessages: th.messageCount || 0,
-    totalEvents: th.events.length
+    active: true,
+    commands: commandCount,
+    heapUsed: (usage.heapUsed / 1024 / 1024).toFixed(1),
+    heapTotal: (usage.heapTotal / 1024 / 1024).toFixed(1),
+    uptime: formatUptime(process.uptime()),
+    memoryItems: memory.size
   };
 }
 
-async function generateAgentResponse(question, context, intent, th, senderName, lang) {
-  const personality = th.personality || "assistant";
-  
-  const systemPrompt = 
-`You are an AI Agent for a group chat. Think step by step and respond like a human.
-
-LANGUAGE: ${lang}
-PERSONALITY: ${personality}
-
-CONTEXT:
-- Members (${context.totalMembers}): ${context.memberList}
-- Recent Messages: ${context.recentConvo}
-- Recent Events: ${context.recentEvents}
-- Popular Topics: ${context.topTopics}
-- Total Messages: ${context.totalMessages}
-- Current User: ${senderName}
-
-INTENT DETECTED: ${intent}
-
-INSTRUCTIONS:
-1. Think step by step before answering
-2. Use the context to provide relevant answers
-3. If asked about specific people, use their names from context
-4. If asked "what happened?", summarize recent events
-5. Be friendly, helpful and natural
-6. Don't say "I'm an AI" or "I'm a bot"
-7. Respond in 1-3 sentences (unless asked for detailed info)
-
-USER QUESTION: ${question}
-
-Your thoughtful response:`;
-
-  const response = await askAI(systemPrompt, question);
-  return response;
-}
-
-function postProcessResponse(response, intent, th) {
-  if (!response) return null;
-  
-  // Add emoji based on intent
-  const emojis = {
-    information: "📝",
-    help: "🤝",
-    opinion: "💭",
-    social: "👥",
-    general: "💬"
-  };
-  
-  const emoji = emojis[intent] || "💬";
-  
-  // Remove duplicate spaces
-  let cleaned = response.replace(/\s+/g, " ").trim();
-  
-  // Add emoji if not present
-  if (!cleaned.startsWith(emoji)) {
-    cleaned = `${emoji} ${cleaned}`;
-  }
-  
-  return cleaned;
-}
-
-// ─── Main Module ────────────────────────────────────────────────────────────
+// ─── MAIN MODULE ────────────────────────────────────────────────────────────
 module.exports = {
   config: {
     name: "groupai",
-    aliases: ["aigroup", "মালাক", "ملاك", "agent", "ai"],
-    version: "5.0",
+    aliases: ["gcai"],
+    version: "3.0.0",
     author: "System",
-    countDown: 0,
-    role: 0,
+    countDown: 3,
+    role: 4,
     shortDescription: {
-      bn: "AI Agent — স্মার্ট গ্রুপ সহকারী",
-      en: "AI Agent — Smart Group Assistant",
-      ar: "وكيل الذكاء الاصطناعي — مساعد المجموعة الذكي"
+      bn: "👑 Group AI — শুধু Owner-এর জন্য",
+      en: "👑 Group AI — Owner Only"
     },
-    category: "AI",
+    category: "AI/Development",
     guide: {
-      bn: "{pn} <প্রশ্ন> — AI Agent-এর মতো উত্তর দেবে\n{pn} status — গ্রুপের অবস্থা দেখুন\n{pn} stats — অ্যানালাইসিস দেখুন",
-      en: "{pn} <question> — AI Agent will answer\n{pn} status — View group status\n{pn} stats — View analysis",
-      ar: "{pn} <سؤال> — سيجيب وكيل الذكاء الاصطناعي\n{pn} status — عرض حالة المجموعة\n{pn} stats — عرض التحليل"
+      bn: ".groupai help",
+      en: ".groupai help"
     }
   },
 
   onStart: async function ({ api, event, args, message, usersData }) {
-    const th = getThread(event.threadID);
-    const senderName = th.members[event.senderID] || 
-                       await usersData.getName(event.senderID).catch(() => "সদস্য");
-    th.members[event.senderID] = senderName;
-
-    const command = args[0]?.toLowerCase();
-
-    // ─── Language Setting ──────────────────────────────────────────────────
-    if (["bangla", "english", "arabic"].includes(command)) {
-      th.language = command;
-      saveMemory();
-      const msgs = {
-        bangla: "✅ ভাষা সেট করা হয়েছে: বাংলা\nএখন AI Agent-এর মতো কাজ করব! 😊",
-        english: "✅ Language set to: English\nNow I'll work like an AI Agent! 😊",
-        arabic: "✅ تم ضبط اللغة إلى: العربية\nالآن سأعمل مثل وكيل الذكاء الاصطناعي! 😊"
-      };
-      return message.reply(msgs[command]);
+    const senderID = String(event.senderID);
+    
+    // ─── 🔒 OWNER CHECK ──────────────────────────────────────────────────
+    if (!isOwner(senderID)) {
+      console.log(`❌ Unauthorized access: ${senderID}`);
+      return message.reply(
+        `👑 **এই কমান্ড শুধু Owner-এর জন্য!**\n` +
+        `আপনার UID: ${senderID}\n` +
+        `অনুমোদিত: ${ALLOWED_USERS.join(", ")}\n\n` +
+        `🔒 Access Denied!`
+      );
     }
 
-    // ─── Status ──────────────────────────────────────────────────────────
-    if (command === "status") {
-      const msgs = {
-        bangla: `📊 **গ্রুপের বর্তমান অবস্থা (AI Agent)**
-
-🧠 মোট সদস্য: ${Object.keys(th.members).length}
-💬 মোট মেসেজ: ${th.messageCount || 0}
-📅 মোট ইভেন্ট: ${th.events.length}
-🔥 সক্রিয় সদস্য: ${Object.keys(th.activeMembers).length}
-🌐 ভাষা: ${th.language}
-🎭 ব্যক্তিত্ব: ${th.personality}
-📌 টপিক: ${Object.keys(th.topics || {}).slice(0, 5).join(", ") || "কোনো টপিক নেই"}`,
-        english: `📊 **Group Status (AI Agent)**
-
-🧠 Total Members: ${Object.keys(th.members).length}
-💬 Total Messages: ${th.messageCount || 0}
-📅 Total Events: ${th.events.length}
-🔥 Active Members: ${Object.keys(th.activeMembers).length}
-🌐 Language: ${th.language}
-🎭 Personality: ${th.personality}
-📌 Topics: ${Object.keys(th.topics || {}).slice(0, 5).join(", ") || "No topics"}`
-      };
-      return message.reply(msgs[th.language] || msgs.bangla);
+    const command = String(args[0] || "").toLowerCase();
+    
+    // Get sender name
+    let senderName = "Owner";
+    try {
+      if (usersData && typeof usersData.getName === 'function') {
+        senderName = await usersData.getName(senderID) || "Owner";
+      }
+    } catch (e) {
+      senderName = "Owner";
     }
 
-    // ─── Stats ──────────────────────────────────────────────────────────
-    if (command === "stats" || command === "analysis") {
-      const topMembers = Object.entries(th.activeMembers)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([name, count], i) => `${i+1}. ${name} — ${count} বার`)
-        .join("\n");
-      
-      const topTopics = Object.entries(th.topics || {})
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([topic, count]) => `${topic} (${count})`)
-        .join(", ");
-      
-      const msgs = {
-        bangla: `📈 **গ্রুপ অ্যানালাইসিস (AI Agent)**
+    try {
+      // ─── HELP ──────────────────────────────────────────────────────────
+      if (!command || command === "help" || command === "h" || command === "?") {
+        return message.reply(helpMessage());
+      }
 
-📊 মোট মেসেজ: ${th.messageCount || 0}
-👥 সক্রিয় সদস্য: ${Object.keys(th.activeMembers).length}
-📅 মোট ইভেন্ট: ${th.events.length}
+      // ─── FACEBOOK ──────────────────────────────────────────────────
+      if (command === "fb" || command === "facebook") {
+        return message.reply(await runFacebookCommand(args));
+      }
 
-🔥 **সেরা ৫ সদস্য:**
-${topMembers || 'কোনো ডেটা নেই'}
+      // ─── FILE COMMANDS ──────────────────────────────────────────────
+      if (["read", "write", "edit", "delete", "list", "ls", "check", "test"].includes(command)) {
+        return message.reply(await runFileCommand(command, args));
+      }
 
-📌 **জনপ্রিয় টপিক:**
-${topTopics || 'কোনো টপিক নেই'}`,
-        english: `📈 **Group Analysis (AI Agent)**
+      // ─── GITHUB ────────────────────────────────────────────────────
+      if (command === "github" || command === "repo") {
+        const result = await githubRequest(args[1], args[2]);
+        if (Array.isArray(result.data)) {
+          const files = result.data.slice(0, 50).map(item => 
+            (item.type === "dir" ? "📁 " : "📄 ") + item.name
+          ).join("\n");
+          return message.reply("🐙 " + result.owner + "/" + result.repo + "\n\n" + files);
+        }
+        const content = result.data.content ? 
+          Buffer.from(result.data.content.replace(/\n/g, ""), "base64").toString("utf8") : 
+          JSON.stringify(result.data, null, 2);
+        return message.reply("📄 " + result.data.path + "\n\n" + content.slice(0, 15000));
+      }
 
-📊 Total Messages: ${th.messageCount || 0}
-👥 Active Members: ${Object.keys(th.activeMembers).length}
-📅 Total Events: ${th.events.length}
-
-🔥 **Top 5 Members:**
-${topMembers || 'No data'}
-
-📌 **Popular Topics:**
-${topTopics || 'No topics'}`
-      };
-      return message.reply(msgs[th.language] || msgs.bangla);
-    }
-
-    // ─── Personality ──────────────────────────────────────────────────
-    if (command === "personality") {
-      const personality = args[1]?.toLowerCase();
-      if (!["friend", "teacher", "assistant", "agent"].includes(personality)) {
+      // ─── STATUS & ANALYSIS ──────────────────────────────────────────
+      if (command === "status" || command === "analyze") {
+        const status = await getSystemStatus();
         return message.reply(
-          `❌ **Invalid personality!**\n\n📋 Available:\n• friend — বন্ধু\n• teacher — শিক্ষক\n• assistant — সহকারী\n• agent — AI Agent (স্মার্ট)`
+          `👑 **GroupAI Status**
+━━━━━━━━━━━━━━━━━━━━
+
+✅ Status: ${status.active ? "Active 🟢" : "Inactive 🔴"}
+📂 Commands: ${status.commands}
+💾 Heap Used: ${status.heapUsed} MB
+💾 Heap Total: ${status.heapTotal} MB
+⏱️ Uptime: ${status.uptime}
+💬 Memory Items: ${status.memoryItems}
+
+👑 Owners: ${ALLOWED_USERS.join(", ")}
+🔒 Access: Owner Only`
         );
       }
-      th.personality = personality;
-      saveMemory();
-      const msgs = {
-        bangla: `✅ ব্যক্তিত্ব সেট করা হয়েছে: ${personality}\nএখন AI Agent-এর মতো কাজ করব! 🤖`,
-        english: `✅ Personality set to: ${personality}\nNow I'll work like an AI Agent! 🤖`,
-        arabic: `✅ تم ضبط الشخصية إلى: ${personality}\nالآن سأعمل مثل وكيل الذكاء الاصطناعي! 🤖`
-      };
-      return message.reply(msgs[th.language] || msgs.bangla);
-    }
 
-    // ─── Agent Question ──────────────────────────────────────────────────
-    if (args.length > 0) {
-      const question = args.join(" ");
-      const response = await agentProcess(question, th, senderName, th.language);
-      
-      if (response) {
-        return message.reply(response);
-      } else {
-        const fallback = {
-          bangla: "🤖 আমি বুঝতে পারিনি। আবার বলুন! 😊",
-          english: "🤖 I didn't understand. Please repeat! 😊",
-          arabic: "🤖 لم أفهم. أعد المحاولة! 😊"
-        };
-        return message.reply(fallback[th.language] || fallback.bangla);
+      // ─── PREDICT ─────────────────────────────────────────────────────
+      if (command === "predict") {
+        const usage = process.memoryUsage();
+        const ratio = usage.heapUsed / usage.heapTotal;
+        if (ratio > 0.8) {
+          return message.reply("⚠️ **Memory Alert!**\nHeap usage 80%+।\n💡 Restart বিবেচনা করুন।");
+        }
+        return message.reply("✅ **Memory Status:** স্বাভাবিক দেখাচ্ছে।\n📊 ব্যবহার: " + (ratio * 100).toFixed(1) + "%");
       }
+
+      // ─── PROBLEMS ──────────────────────────────────────────────────
+      if (command === "problems" || command === "issue") {
+        const problems = [];
+        
+        if (!(await fs.pathExists(path.join(ROOT, "scripts", "cmds")))) {
+          problems.push("scripts/cmds folder পাওয়া যায়নি");
+        }
+        if (!(await fs.pathExists(path.join(ROOT, "modules", "cmds")))) {
+          problems.push("modules/cmds folder পাওয়া যায়নি");
+        }
+
+        const usage = process.memoryUsage();
+        if (usage.heapUsed / usage.heapTotal > 0.8) {
+          problems.push("উচ্চ মেমরি ব্যবহার (80%+)");
+        }
+
+        if (problems.length === 0) {
+          return message.reply("✅ **সবকিছু ঠিক আছে!**\nকোনো সমস্যা পাওয়া যায়নি। 😊");
+        }
+        return message.reply("⚠️ **সমস্যা পাওয়া গেছে:**\n" + problems.map(p => "• " + p).join("\n"));
+      }
+
+      // ─── AI QUESTION ─────────────────────────────────────────────────
+      if (args.length > 0) {
+        const question = args.join(" ");
+        const reply = await buildAIReply(event.threadID, senderName, question);
+        return message.reply(reply);
+      }
+
+      return message.reply(helpMessage());
+
+    } catch (error) {
+      console.error("GroupAI command error:", error);
+      return message.reply("❌ " + (error.message || "Unknown error"));
     }
-
-    // ─── Help Menu ──────────────────────────────────────────────────────
-    const helpMsg = 
-`🤖 **AI AGENT — স্মার্ট গ্রুপ সহকারী**
-
-🌐 **ভাষা:** groupai bangla / english / arabic
-
-💬 **প্রশ্ন করুন:**
-groupai <প্রশ্ন> — AI Agent-এর মতো উত্তর দেবে
-
-🎭 **ব্যক্তিত্ব:**
-groupai personality friend — বন্ধু
-groupai personality teacher — শিক্ষক
-groupai personality assistant — সহকারী
-groupai personality agent — AI Agent (স্মার্ট)
-
-📊 **স্ট্যাটাস:**
-groupai status — বর্তমান অবস্থা
-groupai stats — গ্রুপ অ্যানালাইসিস
-
-💡 **AI Agent বিশেষ ক্ষমতা:**
-• কনটেক্সট বুঝে উত্তর দেয়
-• ইন্টেন্ট ডিটেক্ট করে
-• মাল্টি-স্টেপ রিজনিং করে
-• নিজে থেকেই সাজেশন দেয়
-• গ্রুপের ডেটা বিশ্লেষণ করে
-
-🔹 **চ্যাটে সরাসরি:** "বট" / "bot" / "بوت" লিখুন`;
-
-    return message.reply(helpMsg);
   },
 
-  onChat: async function ({ api, event, message, usersData }) {
-    if (!event.body?.trim()) return;
-
-    const { threadID, senderID, body } = event;
-    const botID = api.getCurrentUserID();
-
-    if (senderID === botID) return;
-
-    const th = getThread(threadID);
-
-    if (!th.members[senderID]) {
-      try {
-        const name = await usersData.getName(senderID);
-        if (name) th.members[senderID] = name;
-      } catch (e) {}
+  // ─── CHAT MONITOR ──────────────────────────────────────────────────────────
+  onChat: async function ({ event, message, usersData }) {
+    const senderID = String(event.senderID);
+    const body = String(event.body || "");
+    
+    if (!body) return;
+    
+    // ─── 🔒 OWNER CHECK ──────────────────────────────────────────────────
+    if (!isOwner(senderID)) {
+      return; // চুপচাপ ইগনোর করবে
     }
-    const senderName = th.members[senderID] || "সদস্য";
-
-    addMessage(threadID, senderName, body, senderID);
-
-    const triggers = ["বট", "bot", "بوت", "groupai", "aigroup", "মালাক", "ملاك", "agent", "ai"];
-    const lower = body.toLowerCase();
-    const isTriggered = triggers.some(t => lower.includes(t)) || 
-                        event.messageReply?.senderID === botID;
-
+    
+    const triggers = ["groupai", "gai", "ga", "ai"];
+    const isTriggered = triggers.some(t => body.toLowerCase().includes(t));
+    
     if (!isTriggered) return;
-
-    let question = body;
-    for (const trigger of triggers) {
-      question = question.replace(new RegExp(trigger, "gi"), "").trim();
-    }
+    
+    const question = body.replace(/groupai|gai|ga|ai/gi, "").trim();
     if (!question) {
-      const fallback = {
-        bangla: "🤖 বলুন, আমি শুনছি! 😊",
-        english: "🤖 Go ahead, I'm listening! 😊",
-        arabic: "🤖 تفضل، أنا أستمع! 😊"
-      };
-      return message.reply(fallback[th.language] || fallback.bangla);
+      return message.reply("👑 **GroupAI:** বলুন, আমি শুনছি! 😊");
     }
-
-    const response = await agentProcess(question, th, senderName, th.language);
-    return message.reply(response || "🤖 আমি বুঝতে পারিনি। আবার বলুন! 😊");
+    
+    let senderName = "Owner";
+    try {
+      if (usersData && typeof usersData.getName === 'function') {
+        senderName = await usersData.getName(senderID) || "Owner";
+      }
+    } catch (e) {
+      senderName = "Owner";
+    }
+    
+    try {
+      const reply = await buildAIReply(event.threadID, senderName, question);
+      return message.reply(reply);
+    } catch (error) {
+      return message.reply("❌ " + error.message);
+    }
   }
 };
