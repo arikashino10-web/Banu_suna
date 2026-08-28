@@ -92,11 +92,95 @@ const baseCache = {
 };
 
 const lastRequestAt = new Map();
+const MEMORY_FILE = path.join(__dirname, "cache", "bby_conversation_memory.json");
+const MAX_MEMORY_WORDS = 30000;
+const MAX_MEMORY_ENTRIES = 5000;
+const conversationMemory = new Map();
+let memorySaveTimer = null;
+
+function wordCount(value) {
+  return clean(value).split(/\s+/).filter(Boolean).length;
+}
+
+function loadConversationMemory() {
+  try {
+    if (!fs.existsSync(MEMORY_FILE)) return;
+    const data = fs.readJsonSync(MEMORY_FILE);
+    if (!data || typeof data !== "object") return;
+    for (const [threadID, entries] of Object.entries(data)) {
+      if (Array.isArray(entries)) conversationMemory.set(threadID, entries.slice(-MAX_MEMORY_ENTRIES));
+    }
+  } catch (error) {
+    console.error("[bby:memory-load]", error.message);
+  }
+}
+
+function persistConversationMemory() {
+  try {
+    fs.ensureDirSync(path.dirname(MEMORY_FILE));
+    const data = Object.fromEntries(conversationMemory);
+    fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 });
+  } catch (error) {
+    console.error("[bby:memory-save]", error.message);
+  }
+}
+
+function scheduleMemorySave() {
+  if (memorySaveTimer) clearTimeout(memorySaveTimer);
+  memorySaveTimer = setTimeout(() => {
+    memorySaveTimer = null;
+    persistConversationMemory();
+  }, 1000);
+}
+
+function trimThreadMemory(threadID) {
+  const key = String(threadID);
+  const entries = conversationMemory.get(key) || [];
+  let totalWords = entries.reduce((sum, item) => sum + wordCount(item.input) + wordCount(item.response), 0);
+  while (entries.length > MAX_MEMORY_ENTRIES || totalWords > MAX_MEMORY_WORDS) {
+    const removed = entries.shift();
+    totalWords -= wordCount(removed?.input) + wordCount(removed?.response);
+  }
+  conversationMemory.set(key, entries);
+}
+
+function rememberConversation(threadID, userID, input, response) {
+  if (!threadID || !clean(input)) return;
+  const key = String(threadID);
+  const entries = conversationMemory.get(key) || [];
+  entries.push({
+    userID: String(userID || ""),
+    input: clean(input).slice(0, 5000),
+    response: clean(response).slice(0, 5000),
+    time: new Date().toISOString()
+  });
+  conversationMemory.set(key, entries);
+  trimThreadMemory(key);
+  scheduleMemorySave();
+}
+
+function getMemoryContext(threadID, maxWords = 2000) {
+  const entries = conversationMemory.get(String(threadID)) || [];
+  const selected = [];
+  let totalWords = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const item = entries[index];
+    const line = "User: " + item.input + "\\nBaby: " + item.response;
+    const count = wordCount(line);
+    if (selected.length && totalWords + count > maxWords) break;
+    selected.unshift(line);
+    totalWords += count;
+  }
+  return selected.join("\\n");
+}
+
+loadConversationMemory();
+
 
 module.exports.config = {
   name: "bby",
   aliases: SETTINGS.aliases,
-  version: "8.0.0",
+  version: "8.1.0",
   author: "Advanced merge",
   countDown: 2,
   role: 0,
@@ -156,7 +240,9 @@ function extractText(data) {
     data.text,
     data.data?.message,
     data.data?.reply,
-    data.data?.response
+    data.data?.response,
+    data.choices?.[0]?.message?.content,
+    data.data?.choices?.[0]?.message?.content
   ];
 
   for (const candidate of candidates) {
@@ -359,44 +445,81 @@ async function firstSuccessful(label, requests) {
   throw new Error(`${label} unavailable: ${errors[errors.length - 1] || "unknown error"}`);
 }
 
-async function getBotResponse(text, attachments = [], senderID = "") {
+
+
+async function pollinationsRequest(input, context) {
+  const response = await axios.post(
+    "https://text.pollinations.ai/",
+    {
+      messages: [
+        { role: "system", content: "You are Baby AI. Answer briefly and helpfully in the user's language. Recent memory:\\n" + (context || "none") },
+        { role: "user", content: input }
+      ],
+      model: "openai",
+      private: true
+    },
+    { timeout: SETTINGS.requestTimeout, headers: { "Content-Type": "application/json" } }
+  );
+  const message = extractText(response.data);
+  if (!message) throw new Error("Pollinations returned an empty response");
+  return message;
+}
+
+function localFallback(input, threadID) {
+  const recent = getMemoryContext(threadID, 120);
+  const value = lower(input);
+  if (/^(hi|hello|hey|হাই|হ্যালো|সালাম)/i.test(value)) return pick(FALLBACK_MESSAGES);
+  if (/(মনে আছে|আগের কথা|remember|previous|আগে কী বলেছিল)/i.test(value) && recent) {
+    return "API এখন offline, তবে সাম্প্রতিক কথোপকথন মনে আছে:\\n\\n" + recent;
+  }
+  return "আমি এখন offline backup mode-এ আছি। API service ফিরে এলে সম্পূর্ণ AI উত্তর দিতে পারব। আপনার কথাটি মনে রাখা হয়েছে।";
+}
+
+async function getBotResponse(text, attachments = [], senderID = "", threadID = "") {
   const input = clean(text) || "meow";
   const files = Array.isArray(attachments) ? attachments : [];
+  const context = getMemoryContext(threadID, 1800);
 
-  const response = await firstSuccessful("Baby AI", [
-    async () => {
-      const result = await legacyRequest({
-        text: input.toLocaleLowerCase(),
-        senderID,
-        font: 1
-      });
-      const message = extractText(result.data);
-      if (!message) throw new Error("Ullash/Simsimi API returned an empty response");
-      return message;
-    },
-    async () => {
-      const result = await hinataRequest("POST", "/api/hinata", {
-        text: input,
-        style: SETTINGS.defaultStyle,
-        attachments: files
-      });
-      const message = extractText(result.data);
-      if (!message) throw new Error("Hinata returned an empty response");
-      return message;
-    },
-    async () => {
-      const result = await noobsRequest({
-        text: input.toLocaleLowerCase(),
-        senderID,
-        font: 1
-      });
-      const message = extractText(result.data);
-      if (!message) throw new Error("Fallback API returned an empty response");
-      return message;
-    }
-  ]);
-
-  return response;
+  try {
+    return await firstSuccessful("Baby AI", [
+      async () => {
+        const result = await legacyRequest({
+          text: input.toLocaleLowerCase(),
+          senderID,
+          font: 1
+        });
+        const message = extractText(result.data);
+        if (!message) throw new Error("Ullash/Simsimi API returned an empty response");
+        return message;
+      },
+      async () => {
+        const result = await hinataRequest("POST", "/api/hinata", {
+          text: input,
+          style: SETTINGS.defaultStyle,
+          attachments: files,
+          context
+        });
+        const message = extractText(result.data);
+        if (!message) throw new Error("Hinata returned an empty response");
+        return message;
+      },
+      async () => {
+        const result = await noobsRequest({
+          text: input.toLocaleLowerCase(),
+          senderID,
+          font: 1,
+          context
+        });
+        const message = extractText(result.data);
+        if (!message) throw new Error("Fallback API returned an empty response");
+        return message;
+      },
+      async () => pollinationsRequest(input, context)
+    ]);
+  } catch (error) {
+    console.error("[bby:all-api-failed]", error.message);
+    return localFallback(input, threadID);
+  }
 }
 
 function splitTeachInput(value) {
@@ -681,7 +804,8 @@ async function handleCommand({ api, event, args, usersData }) {
     );
   }
 
-  const response = await getBotResponse(raw, event.attachments || [], userID);
+  const response = await getBotResponse(raw, event.attachments || [], userID, event.threadID);
+  rememberConversation(event.threadID, userID, raw, response);
   return sendReply(api, event, response);
 }
 
@@ -709,7 +833,8 @@ module.exports.onReply = async ({ api, event }) => {
     react(api, event);
     typing(api, event);
     const text = clean(event.body) || mediaPrompt(event);
-    const response = await getBotResponse(text, event.attachments || [], event.senderID);
+    const response = await getBotResponse(text, event.attachments || [], event.senderID, event.threadID);
+    rememberConversation(event.threadID, event.senderID, text, response);
     await sendReply(api, event, response);
   } catch (error) {
     console.error("[bby:onReply]", error);
@@ -736,7 +861,8 @@ module.exports.onChat = async ({ api, event }) => {
     }
 
     const input = mention.text || mediaPrompt(event);
-    const response = await getBotResponse(input, event.attachments || [], event.senderID);
+    const response = await getBotResponse(input, event.attachments || [], event.senderID, event.threadID);
+    rememberConversation(event.threadID, event.senderID, input, response);
     await sendReply(api, event, response);
   } catch (error) {
     console.error("[bby:onChat]", error);
