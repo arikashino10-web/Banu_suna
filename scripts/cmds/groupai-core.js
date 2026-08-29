@@ -204,6 +204,10 @@ function detectLanguage(text) {
   return "English";
 }
 
+function usableApiKey(value) {
+  return typeof value === "string" && /^[\x21-\x7E]+$/.test(value.trim());
+}
+
 async function fetchJson(url, options = {}, timeoutMs = 45000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -235,8 +239,8 @@ async function fetchJson(url, options = {}, timeoutMs = 45000) {
 }
 
 async function askOpenRouter(systemPrompt, userMessage) {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) return null;
+  const key = String(process.env.OPENROUTER_API_KEY || "").trim();
+  if (!usableApiKey(key)) return null;
   const data = await fetchJson("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -260,8 +264,13 @@ async function askOpenRouter(systemPrompt, userMessage) {
 
 async function askPollinations(systemPrompt, userMessage) {
   const headers = { "Content-Type": "application/json" };
-  if (process.env.POLLINATIONS_API_KEY) {
-    headers.Authorization = `Bearer ${process.env.POLLINATIONS_API_KEY}`;
+  const key = String(process.env.POLLINATIONS_API_KEY || "").trim();
+  const hasUsableKey = usableApiKey(key);
+  if (key && !hasUsableKey) {
+    console.error("Pollinations key ignored: it contains unsupported characters");
+  }
+  if (hasUsableKey) {
+    headers.Authorization = `Bearer ${key}`;
   }
   const data = await fetchJson("https://text.pollinations.ai/", {
     method: "POST",
@@ -272,7 +281,7 @@ async function askPollinations(systemPrompt, userMessage) {
         { role: "user", content: userMessage }
       ],
       model: process.env.POLLINATIONS_MODEL || "openai",
-      private: true
+      private: hasUsableKey
     })
   });
   return data?.choices?.[0]?.message?.content || data?.response || null;
@@ -533,8 +542,13 @@ async function diagnostics(mode) {
     : 0;
   const problems = [];
   if (!fs.existsSync(commandDir)) problems.push("scripts/cmds folder পাওয়া যায়নি");
-  if (!process.env.OPENROUTER_API_KEY && !process.env.POLLINATIONS_API_KEY) {
+  const openRouterReady = usableApiKey(process.env.OPENROUTER_API_KEY);
+  const pollinationsReady = usableApiKey(process.env.POLLINATIONS_API_KEY);
+  if (!openRouterReady && !pollinationsReady) {
     problems.push("AI key/config পাওয়া যায়নি; Pollinations public fallback চেষ্টা হবে");
+  }
+  if (process.env.POLLINATIONS_API_KEY && !pollinationsReady) {
+    problems.push("Pollinations key-এ unsupported character আছে; key আবার দিন");
   }
   if (usage.heapUsed / usage.heapTotal > 0.8) problems.push("Heap usage 80%+");
   const base = `Node ${process.version} | ${process.platform}
@@ -542,7 +556,7 @@ Commands: ${commandCount}
 Heap: ${(usage.heapUsed / 1024 / 1024).toFixed(1)} / ${(usage.heapTotal / 1024 / 1024).toFixed(1)} MB
 Uptime: ${formatUptime(process.uptime())}
 Memory threads: ${memory.size} (up to ${MAX_MESSAGES} messages/thread)
-AI: ${process.env.OPENROUTER_API_KEY ? "OpenRouter ready" : "OpenRouter key missing"} → Pollinations backup`;
+  AI: ${openRouterReady ? "OpenRouter ready" : "OpenRouter key missing"} → ${pollinationsReady ? "Pollinations backup ready" : "Pollinations backup unavailable"}`;
   if (mode === "problems") return problems.length ? `⚠️ Problems:\n• ${problems.join("\n• ")}` : "✅ কোনো সমস্যা পাওয়া যায়নি";
   if (mode === "predict") {
     const ratio = usage.heapUsed / usage.heapTotal;
