@@ -244,8 +244,16 @@ function asError(error) {
     "Unknown API error";
 }
 
+function isHtmlDocument(value) {
+  const text = clean(value);
+  return /^<!doctype html[\s>]/i.test(text) || /^<html[\s>]/i.test(text);
+}
+
 function extractText(data) {
-  if (typeof data === "string") return clean(data);
+  if (typeof data === "string") {
+    const text = clean(data);
+    return isHtmlDocument(text) ? "" : text;
+  }
   if (!data || typeof data !== "object") return "";
 
   const candidates = [
@@ -265,7 +273,8 @@ function extractText(data) {
       const text = candidate.map(clean).filter(Boolean).join("\n");
       if (text) return text;
     } else if (clean(candidate)) {
-      return clean(candidate);
+      const text = clean(candidate);
+      if (!isHtmlDocument(text)) return text;
     }
   }
 
