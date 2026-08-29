@@ -5,6 +5,17 @@ const baseApiUrl = async () => {
         return base.data.mahmud;
 };
 
+async function askGemini(prompt, imageUrl = "") {
+  const base = await baseApiUrl();
+  const endpoint = imageUrl
+    ? base + "/api/gemini?chat=" + encodeURIComponent(prompt) + "&url=" + encodeURIComponent(imageUrl)
+    : base + "/api/gemini?chat=" + encodeURIComponent(prompt);
+  const response = await axios.get(endpoint, { timeout: 15000 });
+  const reply = response.data?.response || response.data?.reply || response.data?.text;
+  if (!reply) throw new Error("Gemini returned an empty response");
+  return String(reply).trim();
+}
+
 module.exports = {
         config: {
                 name: "gemini",
@@ -100,3 +111,6 @@ async function handleGemini(api, event, prompt, imageUrl, commandName, getLang) 
                 api.sendMessage(getLang("error", err.message), event.threadID, event.messageID);
         }
                             }
+
+
+module.exports.askGemini = askGemini;
