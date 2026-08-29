@@ -169,10 +169,19 @@ function safePath(input, { allowSensitive = false } = {}) {
   assertInsideRoot(fullPath);
 
   try {
-    if (fs.existsSync(fullPath)) assertInsideRoot(fs.realpathSync(fullPath));
-    else {
-      const parent = fs.realpathSync(path.dirname(fullPath));
-      assertInsideRoot(parent);
+    // New files may be placed in a new directory. Resolve the nearest
+    // existing ancestor instead of requiring every parent to exist already.
+    // This still rejects symlinks that escape the project root.
+    if (fs.existsSync(fullPath)) {
+      assertInsideRoot(fs.realpathSync(fullPath));
+    } else {
+      let ancestor = path.dirname(fullPath);
+      while (!fs.existsSync(ancestor)) {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) throw new Error("Path resolve করা যায়নি");
+        ancestor = parent;
+      }
+      assertInsideRoot(fs.realpathSync(ancestor));
     }
   } catch {
     throw new Error("Path resolve করা যায়নি");
@@ -287,6 +296,40 @@ async function askAI(systemPrompt, userMessage) {
 
 function getFacebookApi(context) {
   return context.api || global.GoatBot?.fcaApi || global.api || null;
+}
+
+function callFacebookApi(api, method, args = []) {
+  const fn = api?.[method];
+  if (typeof fn !== "function") {
+    throw new Error(`${method} API available নয়`);
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error instanceof Error ? error : new Error(String(error)));
+      else resolve(value);
+    };
+    const callback = (error, value) => finish(error, value);
+
+    try {
+      const result = fn.call(api, ...args, callback);
+      if (result && typeof result.then === "function") {
+        result.then(value => finish(null, value), error => finish(error));
+      } else if (result !== undefined || fn.length <= args.length) {
+        // Promise-returning and synchronous clients do not need the callback.
+        finish(null, result);
+      }
+    } catch (error) {
+      finish(error);
+    }
+
+    setTimeout(() => {
+      if (!settled) finish(new Error(`${method} API timeout`));
+    }, 30000).unref?.();
+  });
 }
 
 function currentUserID(api) {
@@ -422,15 +465,14 @@ async function runFacebookCommand(args, context, session) {
     }
     const payload = { body: content, privacy: visibility === "public" ? "EVERYONE" : "SELF" };
     const result = typeof api.createPost === "function"
-      ? await api.createPost(payload)
-      : await api.post(payload);
+      ? await callFacebookApi(api, "createPost", [payload])
+      : await callFacebookApi(api, "post", [payload]);
     return `✅ Facebook ${visibility} post পাঠানো হয়েছে${result?.id ? `: ${result.id}` : ""}`;
   }
 
   if (subcommand === "like") {
     if (!args[2]) throw new Error("Message/post ID দিন");
-    if (typeof api.setMessageReaction !== "function") throw new Error("Like API available নয়");
-    await api.setMessageReaction("👍", args[2]);
+    await callFacebookApi(api, "setMessageReaction", ["👍", args[2]]);
     return `✅ Like দেওয়া হয়েছে: ${args[2]}`;
   }
 
@@ -438,8 +480,7 @@ async function runFacebookCommand(args, context, session) {
     const target = args[2];
     const text = args.slice(3).join(" ");
     if (!target || !text) throw new Error("Target thread/message ID এবং comment দিন");
-    if (typeof api.sendMessage !== "function") throw new Error("Comment/message API available নয়");
-    await api.sendMessage(text, target);
+    await callFacebookApi(api, "sendMessage", [text, target]);
     return "✅ Comment/message পাঠানো হয়েছে";
   }
 
@@ -447,7 +488,7 @@ async function runFacebookCommand(args, context, session) {
     const threadID = args[2];
     const limit = Math.min(Math.max(Number(args[3]) || 10, 1), 50);
     if (!threadID) throw new Error("Thread ID দিন");
-    const messages = await api.getThreadHistory(threadID, limit);
+    const messages = await callFacebookApi(api, "getThreadHistory", [threadID, limit]);
     return `📖 ${threadID}\n\n${(messages || []).slice(0, limit)
       .map(item => `• ${item.senderName || item.senderID || ""}: ${item.body || "[attachment]"}`)
       .join("\n") || "(কোনো message নেই)"}`;
@@ -455,7 +496,7 @@ async function runFacebookCommand(args, context, session) {
 
   if (subcommand === "info") {
     const uid = args[2] || currentUserID(api);
-    const info = await api.getUserInfo(uid);
+    const info = await callFacebookApi(api, "getUserInfo", [uid]);
     const user = info?.[uid];
     return user ? `👤 ${user.name || "Unknown"}\nUID: ${uid}` : "User পাওয়া যায়নি";
   }
@@ -467,14 +508,13 @@ async function runFacebookCommand(args, context, session) {
     const target = args[2];
     const text = args.slice(3).join(" ");
     if (!target || !text) throw new Error("Target thread ID এবং message দিন");
-    await api.sendMessage(text, target);
+    await callFacebookApi(api, "sendMessage", [text, target]);
     return "✅ Owner permission অনুযায়ী message পাঠানো হয়েছে";
   }
 
   if (subcommand === "avatar" || subcommand === "profile") {
-    if (typeof api.changeAvatar !== "function") throw new Error("Profile picture API available নয়");
     const filePath = safePath(args[2], { allowSensitive: false });
-    await api.changeAvatar(filePath);
+    await callFacebookApi(api, "changeAvatar", [filePath]);
     return "✅ Profile picture update request পাঠানো হয়েছে";
   }
 
@@ -534,8 +574,12 @@ function naturalAction(input) {
   if (/^(predict|প্রেডিক্ট)/i.test(text)) return ["predict"];
   if (/^(problems|problem|issue|সমস্যা)/i.test(text)) return ["problems"];
   if (/^(list files|show files|ফাইল দেখাও|ফাইল লিস্ট)/i.test(lower)) return ["list", "."];
-  const read = text.match(/^(?:read|show|open|পড়ো|পড়ো|দেখাও)\s+(?:file\s+)?(.+)$/i);
-  if (read) return ["read", read[1]];
+  const tokens = splitArgs(text);
+  const readCommands = new Set(["read", "show", "open", "পড়ো", "পড়ো", "দেখাও"]);
+  if (readCommands.has(String(tokens[0] || "").toLowerCase())) {
+    const pathStart = String(tokens[1] || "").toLowerCase() === "file" ? 2 : 1;
+    if (tokens[pathStart]) return ["read", tokens.slice(pathStart).join(" ")];
+  }
   return null;
 }
 
