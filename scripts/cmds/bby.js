@@ -94,6 +94,18 @@ const baseCache = {
 };
 
 const lastRequestAt = new Map();
+const handledEvents = new Map();
+
+function claimEvent(event) {
+  const id = event?.messageID || event?.messageId;
+  if (!id) return true;
+  const key = String(id);
+  if (handledEvents.has(key)) return false;
+  handledEvents.set(key, true);
+  setTimeout(() => handledEvents.delete(key), 60000);
+  return true;
+}
+
 const MEMORY_FILE = path.join(__dirname, "cache", "bby_conversation_memory.json");
 const MAX_MEMORY_WORDS = 30000;
 const MAX_MEMORY_ENTRIES = 5000;
@@ -263,22 +275,15 @@ function extractText(data) {
 function splitReply(text) {
   const value = clean(text);
   if (!value) return ["দুঃখিত, কোনো উত্তর পাওয়া যায়নি।"];
+  if (value.length <= SETTINGS.maxReplyLength) return [value];
 
-  const chunks = [];
-  let remaining = value;
-  while (remaining.length > SETTINGS.maxReplyLength) {
-    let cut = remaining.lastIndexOf("\n", SETTINGS.maxReplyLength);
-    if (cut < SETTINGS.maxReplyLength * 0.55) {
-      cut = remaining.lastIndexOf(" ", SETTINGS.maxReplyLength);
-    }
-    if (cut < SETTINGS.maxReplyLength * 0.55) {
-      cut = SETTINGS.maxReplyLength;
-    }
-    chunks.push(remaining.slice(0, cut).trim());
-    remaining = remaining.slice(cut).trim();
+  const suffix = "\n\n… (উত্তরটি সংক্ষিপ্ত করা হয়েছে)";
+  let cut = value.lastIndexOf("\n", SETTINGS.maxReplyLength - suffix.length);
+  if (cut < SETTINGS.maxReplyLength * 0.55) {
+    cut = value.lastIndexOf(" ", SETTINGS.maxReplyLength - suffix.length);
   }
-  if (remaining) chunks.push(remaining);
-  return chunks;
+  if (cut < SETTINGS.maxReplyLength * 0.55) cut = SETTINGS.maxReplyLength - suffix.length;
+  return [value.slice(0, Math.max(1, cut)).trimEnd() + suffix];
 }
 
 function markReply(info, event, extra = {}) {
@@ -820,6 +825,7 @@ async function handleCommand({ api, event, args, usersData }) {
 
 module.exports.onStart = async (context) => {
   const { api, event } = context;
+  if (!claimEvent(event)) return;
   if (!checkCooldown(event, "command")) return;
 
   try {
@@ -836,6 +842,7 @@ module.exports.onStart = async (context) => {
 
 module.exports.onReply = async ({ api, event }) => {
   if (event.type !== "message_reply") return;
+  if (!claimEvent(event)) return;
   if (!checkCooldown(event, "reply")) return;
 
   try {
@@ -855,6 +862,7 @@ module.exports.onReply = async ({ api, event }) => {
 
 module.exports.onChat = async ({ api, event }) => {
   if (event.type === "message_reply") return;
+  if (!claimEvent(event)) return;
 
   const mention = findMentionPrefix(event.body);
   if (!mention) return;
