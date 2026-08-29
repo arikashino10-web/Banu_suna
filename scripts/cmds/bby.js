@@ -24,6 +24,8 @@
  */
 
 const axios = require("axios");
+const fs = require("fs-extra");
+const path = require("path");
 
 const SETTINGS = Object.freeze({
   requestTimeout: 15000,
@@ -186,6 +188,7 @@ module.exports.config = {
   role: 0,
   description: "Advanced Baby AI chat, teaching, replies, reactions and media support",
   category: "chat",
+  usePrefix: false,
   guide: {
     en: [
       "{pn} <message>",
@@ -280,16 +283,22 @@ function splitReply(text) {
 
 function markReply(info, event, extra = {}) {
   const store = global.GoatBot?.onReply;
-  if (!store || typeof store.set !== "function" || !info?.messageID) return;
+  const messageID = info?.messageID || info?.messageId || info?.id || info?.message_id;
+  if (!store || typeof store.set !== "function" || !messageID) return;
 
-  store.set(info.messageID, {
+  const replyData = {
     commandName: module.exports.config.name,
     type: "reply",
-    messageID: info.messageID,
+    messageID,
     author: event.senderID,
     threadID: event.threadID,
     ...extra
-  });
+  };
+
+  // Keep the native key and a string key so adapters that change the ID type
+  // between send and receive still find the reply handler.
+  store.set(messageID, replyData);
+  store.set(String(messageID), replyData);
 }
 
 function sendOne(api, text, event, callback) {
