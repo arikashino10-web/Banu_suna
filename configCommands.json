@@ -33,6 +33,7 @@
     }
   },
   "commandUnload": [
-    "alldl.js"
+    "alldl.js",
+    "groupai-core.js"
   ]
 }
