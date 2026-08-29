@@ -47,15 +47,15 @@ onReply: async function({ api, event, Reply, getLang, commandName, prefix }) {
  const index = body.split(/\s+/);
  for (const ArYanIndex of index) {
  if (isNaN(ArYanIndex) || ArYanIndex <= 0 || ArYanIndex > Reply.pending.length) return api.sendMessage(getLang("invaildNumber", ArYanIndex), threadID, messageID);
- api.sendMessage(`💞⪼ MCF OWNER ROCKY⪻🌝
+ api.sendMessage(`💞⪼ JABED VAO⪻🌝
 ╭──────────────⭓
 │‣ 𝐆𝐥𝐨𝐛𝐚𝐥 𝐩𝐫𝐞𝐟𝐢𝐱: . 
 │‣ 𝐘𝐨𝐮𝐫 𝐠𝐫𝐨𝐮𝐩 𝐩𝐫𝐞𝐟𝐢𝐱: check using prefix cmd
 ╰──────────────⭓
 ╭──────────────⭓
 │➜ 𝐎𝐭𝐡𝐞𝐫 𝐃𝐞𝐭𝐚𝐢𝐥𝐬🥰
-│Owner : 𝐑𝐎𝐂𝐊𝐘 𝐂𝐇𝐎𝐖𝐃𝐇𝐔𝐑𝐘
-│FB : m.me/mCf.cYber.ForCes.Rocky.404
+│Owner : JABED 
+│FB : https://m.me/61576355017916
 ╰──────────────⭓`, Reply.pending[ArYanIndex - 1].threadID);
  count+=1;
  }
