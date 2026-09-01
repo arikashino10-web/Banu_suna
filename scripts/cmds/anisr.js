@@ -11,9 +11,31 @@ const cookiePath = path.join(__dirname, 'tiktokCookie.json');
 function getCookie() {
   try {
     const data = fs.readJsonSync(cookiePath);
-    const cookie = data && data.cookie;
-    if (!cookie || cookie === 'PASTE_YOUR_TIKTOK_COOKIE_HERE') return null;
-    return cookie;
+
+    // Supports THREE shapes, so however Cookie-Editor exported it, it just works:
+    // 1) A raw array of cookie objects (Cookie-Editor's default "Export as JSON")
+    // 2) { "cookie": [ ...array of cookie objects... ] }
+    // 3) { "cookie": "sessionid=abc; tt_webid=xyz; ..." } (a plain string)
+    let raw = data;
+    if (!Array.isArray(data) && data && data.cookie !== undefined) {
+      raw = data.cookie;
+    }
+
+    if (typeof raw === 'string') {
+      if (!raw || raw === 'PASTE_YOUR_TIKTOK_COOKIE_HERE') return null;
+      return raw;
+    }
+
+    if (Array.isArray(raw) && raw.length > 0) {
+      // Build the "name=value; name2=value2" string TikTok's API expects
+      // out of the Cookie-Editor object array.
+      return raw
+        .filter(c => c && c.name && c.value !== undefined)
+        .map(c => `${c.name}=${c.value}`)
+        .join('; ');
+    }
+
+    return null;
   } catch (e) {
     return null;
   }
