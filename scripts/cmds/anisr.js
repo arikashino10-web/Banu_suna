@@ -47,10 +47,13 @@ const VIDEO_HEADERS = {
   'Referer': 'https://www.tiktok.com/',
 };
 
-async function downloadVideoToFile(url, destPath) {
+async function downloadVideoToFile(url, destPath, cookie) {
   const response = await axios.get(url, {
     responseType: 'arraybuffer',
-    headers: VIDEO_HEADERS,
+    headers: {
+      ...VIDEO_HEADERS,
+      Cookie: cookie,
+    },
     timeout: 45000,
     maxRedirects: 5,
   });
@@ -138,7 +141,7 @@ module.exports = {
 
     try {
       fs.ensureDirSync(path.join(__dirname, 'cache'));
-      await downloadVideoToFile(videoUrl, tempPath);
+      await downloadVideoToFile(videoUrl, tempPath, cookie);
 
       api.sendMessage(
         {
