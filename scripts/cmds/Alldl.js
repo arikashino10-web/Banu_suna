@@ -112,7 +112,7 @@ module.exports = {
     name: "alldl",
     aliases: ["downloaddd", "dlll"],
     version: "2.0",
-    author: "乛 SIYAM ゎ (updated)",
+    author: "JABED VAO (updated)",
     countDown: 10,
     role: 0,
     description: {
