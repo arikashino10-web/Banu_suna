@@ -1,97 +1,139 @@
-const axios = require("axios");
-const fs = require("fs-extra");
-const path = require("path");
+const Tiktok = require('@tobyg74/tiktok-api-dl');
+const axios = require('axios');
+const fs = require('fs-extra');
+const path = require('path');
 
-const baseApiUrl = async () => {
-        const base = await axios.get("https://raw.githubusercontent.com/mahmudx7/HINATA/main/baseApiUrl.json");
-        return base.data.mahmud;
+// Cookie lives in its own file (tiktokCookie.json), sitting right next
+// to this command file. Keeping it separate means refreshing an expired
+// cookie is a one-line edit — this file never needs to be touched again.
+const cookiePath = path.join(__dirname, 'tiktokCookie.json');
+
+function getCookie() {
+  try {
+    const data = fs.readJsonSync(cookiePath);
+    const cookie = data && data.cookie;
+    if (!cookie || cookie === 'PASTE_YOUR_TIKTOK_COOKIE_HERE') return null;
+    return cookie;
+  } catch (e) {
+    return null;
+  }
+}
+
+// TikTok's CDN blocks plain requests without browser-like headers.
+const VIDEO_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+  'Referer': 'https://www.tiktok.com/',
 };
 
+async function downloadVideoToFile(url, destPath) {
+  const response = await axios.get(url, {
+    responseType: 'arraybuffer',
+    headers: VIDEO_HEADERS,
+    timeout: 45000,
+    maxRedirects: 5,
+  });
+
+  const contentType = response.headers['content-type'] || '';
+  if (!contentType.startsWith('video/') && !contentType.includes('octet-stream')) {
+    throw new Error(`Unexpected content-type: "${contentType}" (link likely blocked or expired)`);
+  }
+
+  await fs.writeFile(destPath, response.data);
+  const stats = await fs.stat(destPath);
+  if (stats.size < 1024) {
+    throw new Error(`Downloaded file too small (${stats.size} bytes) — probably not a real video.`);
+  }
+  return destPath;
+}
+
 module.exports = {
-        config: {
-                name: "anisearch",
-                aliases: ["animesr", "anisr"],
-                version: "1.7",
-                author: "MahMUD",
-                countDown: 10,
-                role: 0,
-                description: {
-                        en: "Search and download anime videos",
-                        vi: "Tìm kiếm và tải xuống video anime"
-                },
-                category: "anime",
-                guide: {
-                        en: '   {pn} <anime name>: Type anime name to search'
-                                + '\n   Example: {pn} naruto',
-                        vi: '   {pn} <tên anime>: Nhập tên anime để tìm kiếm'
-                                + '\n   Ví dụ: {pn} naruto'
-                }
+  config: {
+    name: "anisr",
+    aliases: ["animeedit", "tiktoksearch"],
+    version: "3.0",
+    author: "JABED",
+    countDown: 10,
+    role: 0,
+    description: "Search and send a random TikTok anime-edit video — runs entirely in-bot via @tobyg74/tiktok-api-dl, no third-party hosted API",
+    category: "anime",
+    guide: {
+      en: "{p}{n} [query]",
+    },
+  },
+
+  onStart: async function ({ api, event, args }) {
+    api.setMessageReaction("✨", event.messageID, () => {}, true);
+
+    const query = args.join(' ').trim();
+    if (!query) {
+      return api.sendMessage("দয়া করে একটা সার্চ কিওয়ার্ড দিন। যেমন: anisr naruto", event.threadID, event.messageID);
+    }
+
+    const cookie = getCookie();
+    if (!cookie) {
+      return api.sendMessage(
+        "⚠️ TikTok cookie সেট করা নেই।\n\n" +
+        "tiktokCookie.json ফাইলে গিয়ে আপনার নিজের TikTok cookie বসান, তারপর আবার চেষ্টা করুন।",
+        event.threadID, event.messageID
+      );
+    }
+
+    const searchQuery = `${query} anime edit`;
+    let result;
+    try {
+      result = await Tiktok.Search(searchQuery, {
+        type: "video",
+        page: 1,
+        cookie,
+      });
+    } catch (e) {
+      console.error('anisr: search failed:', e.message);
+      return api.sendMessage(
+        `সার্চ ব্যর্থ হয়েছে: ${e.message}\n\nকুকির মেয়াদ শেষ হয়ে থাকতে পারে — নতুন কুকি নিয়ে tiktokCookie.json আপডেট করুন।`,
+        event.threadID, event.messageID
+      );
+    }
+
+    if (!result || result.status !== 'success' || !Array.isArray(result.result) || result.result.length === 0) {
+      return api.sendMessage(
+        `"${query}"-এর জন্য কোনো ভিডিও পাওয়া যায়নি।\n` +
+        (result && result.message ? `কারণ: ${result.message}` : 'অন্য কিওয়ার্ড দিয়ে চেষ্টা করুন, অথবা কুকি এখনো ভ্যালিড কিনা যাচাই করুন।'),
+        event.threadID, event.messageID
+      );
+    }
+
+    const videos = result.result;
+    const selected = videos[Math.floor(Math.random() * videos.length)];
+    const videoUrl = (selected.video && (selected.video.playAddr || selected.video.downloadAddr)) || null;
+    const title = selected.desc || "No title available";
+    const author = (selected.author && (selected.author.nickname || selected.author.uniqueId)) || "Unknown";
+
+    if (!videoUrl) {
+      return api.sendMessage("ভিডিও লিংক পাওয়া যায়নি এই রেজাল্টে, আবার চেষ্টা করুন।", event.threadID, event.messageID);
+    }
+
+    const tempPath = path.join(__dirname, 'cache', `anisr_${Date.now()}.mp4`);
+
+    try {
+      fs.ensureDirSync(path.join(__dirname, 'cache'));
+      await downloadVideoToFile(videoUrl, tempPath);
+
+      api.sendMessage(
+        {
+          body: `🎥 ${title}\n👤 By: ${author}\n\nএখানে আপনার ভিডিও!`,
+          attachment: fs.createReadStream(tempPath),
         },
-
-        langs: {
-                en: {
-                        noQuery: "• Baby, please provide a search query.",
-                        success: "• 𝐇𝐞𝐫𝐞'𝐬 𝐲𝐨𝐮𝐫 𝐚𝐧𝐢𝐦𝐞 𝐯𝐢𝐝𝐞𝐨 <😘\n• 𝐒𝐞𝐚𝐫𝐜𝐡: %1",
-                        error: "× Api Error: fetching anime video: %1. Contact MahMUD for help.\n•WhatsApp: 01836298139"
-                },
-                vi: {
-                        noQuery: "• Vui lòng nhập tên anime cần tìm.",
-                        success: "• 𝐇𝐞𝐫𝐞'𝐬 𝐲𝐨𝐮𝐫 𝐚𝐧𝐢𝐦𝐞 𝐯𝐢𝐝𝐞𝐨 <😘\n• 𝐒𝐞𝐚𝐫𝐜𝐡: %1",
-                        error: "× Lỗi khi lấy video anime: %1. Liên hệ MahMUD để được hỗ trợ.\n•WhatsApp: 01836298139"
-                }
-        },
-
-        onStart: async function ({ api, message, args, event, getLang }) {
-                const authorName = String.fromCharCode(77, 97, 104, 77, 85, 68);
-                if (this.config.author !== authorName) {
-                        return api.sendMessage("You are not authorized to change the author name.", event.threadID, event.messageID);
-                }
-
-                if (!args.length) return message.reply(getLang("noQuery"));
-
-                const kw = args.join(" ");
-                const cacheDir = path.join(__dirname, "cache");
-                const videoPath = path.join(cacheDir, `anisr_${Date.now()}.mp4`);
-                
-                await fs.ensureDir(cacheDir);
-
-                try { 
-                        api.setMessageReaction("⏳", event.messageID, () => {}, true); 
-                } catch (e) {}
-
-                try {
-                        const response = await axios.get(`${await baseApiUrl()}/api/anisr?search=${encodeURIComponent(kw)}`, {
-                                responseType: "stream",
-                                timeout: 60000
-                        });
-
-                        const writer = fs.createWriteStream(videoPath);
-                        response.data.pipe(writer);
-
-                        await new Promise((resolve, reject) => { 
-                                writer.on("finish", resolve);  
-                                writer.on("error", reject);
-                        });
-
-                        if (fs.statSync(videoPath).size < 100) { 
-                                throw new Error("File empty or invalid.");
-                        }
-
-                        await message.reply({ 
-                                body: getLang("success", kw),
-                                attachment: fs.createReadStream(videoPath)
-                        });
-
-                        api.setMessageReaction("✅", event.messageID, () => {}, true);
-
-                } catch (err) {
-                        console.error(err);
-                        api.setMessageReaction("❌", event.messageID, () => {}, true);
-                        return message.reply(getLang("error", err.message));
-                } finally {
-                        setTimeout(() => { 
-                                if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath); 
-                        }, 5000);
-                }
-        }
+        event.threadID,
+        () => fs.unlink(tempPath).catch(() => {}),
+        event.messageID
+      );
+    } catch (e) {
+      console.error('anisr: video download/send failed:', e.message);
+      fs.unlink(tempPath).catch(() => {});
+      api.sendMessage(
+        `ভিডিওটা পাঠাতে ব্যর্থ হয়েছে।\nকারণ: ${e.message}\n\nআবার চেষ্টা করুন।`,
+        event.threadID, event.messageID
+      );
+    }
+  },
 };
