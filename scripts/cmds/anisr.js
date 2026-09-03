@@ -1,164 +1,119 @@
-const Tiktok = require('@tobyg74/tiktok-api-dl');
 const axios = require('axios');
 const fs = require('fs-extra');
 const path = require('path');
 
-// Cookie lives in its own file (tiktokCookie.json), sitting right next
-// to this command file. Keeping it separate means refreshing an expired
-// cookie is a one-line edit — this file never needs to be touched again.
-const cookiePath = path.join(__dirname, 'tiktokCookie.json');
+if (!global.instaMemory) global.instaMemory = new Set();
 
-function getCookie() {
-  try {
-    const data = fs.readJsonSync(cookiePath);
+const TUTORIAL_KEYWORDS = [
+  "tutorial", "how to edit", "how to make", "how i edit", "how to create",
+  "cara edit", "cara buat", "cara membuat", "edit tutorial", "editing tutorial",
+  "step by step", "tuto edit", "tuto ", "learn how", "edit guide",
+  "guide to edit", "capcut tutorial", "alight motion tutorial",
+  "kaise edit", "edit kaise", "edit karna", "editing kaise", "coba edit",
+  "belajar edit", "trik edit", "tips edit", "preset tutorial"
+];
 
-    // Supports THREE shapes, so however Cookie-Editor exported it, it just works:
-    // 1) A raw array of cookie objects (Cookie-Editor's default "Export as JSON")
-    // 2) { "cookie": [ ...array of cookie objects... ] }
-    // 3) { "cookie": "sessionid=abc; tt_webid=xyz; ..." } (a plain string)
-    let raw = data;
-    if (!Array.isArray(data) && data && data.cookie !== undefined) {
-      raw = data.cookie;
-    }
-
-    if (typeof raw === 'string') {
-      if (!raw || raw === 'PASTE_YOUR_TIKTOK_COOKIE_HERE') return null;
-      return raw;
-    }
-
-    if (Array.isArray(raw) && raw.length > 0) {
-      // Build the "name=value; name2=value2" string TikTok's API expects
-      // out of the Cookie-Editor object array.
-      return raw
-        .filter(c => c && c.name && c.value !== undefined)
-        .map(c => `${c.name}=${c.value}`)
-        .join('; ');
-    }
-
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// TikTok's CDN blocks plain requests without browser-like headers.
-const VIDEO_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-  'Referer': 'https://www.tiktok.com/',
-};
-
-async function downloadVideoToFile(url, destPath, cookie) {
-  const response = await axios.get(url, {
-    responseType: 'arraybuffer',
-    headers: {
-      ...VIDEO_HEADERS,
-      Cookie: cookie,
-    },
-    timeout: 45000,
-    maxRedirects: 5,
-  });
-
-  const contentType = response.headers['content-type'] || '';
-  if (!contentType.startsWith('video/') && !contentType.includes('octet-stream')) {
-    throw new Error(`Unexpected content-type: "${contentType}" (link likely blocked or expired)`);
-  }
-
-  await fs.writeFile(destPath, response.data);
-  const stats = await fs.stat(destPath);
-  if (stats.size < 1024) {
-    throw new Error(`Downloaded file too small (${stats.size} bytes) — probably not a real video.`);
-  }
-  return destPath;
+function isTutorialVideo(video) {
+  const text = `${video.title || ""} ${video.desc || ""} ${video.description || ""}`.toLowerCase();
+  return TUTORIAL_KEYWORDS.some(kw => text.includes(kw));
 }
 
 module.exports = {
   config: {
     name: "anisr",
-    aliases: ["animeedit", "tiktoksearch"],
-    version: "3.0",
-    author: "JABED",
-    countDown: 10,
+    aliases: ["anisearch"],
+    version: "1.3.2",
+    author: "Arafat",
+    countDown: 5,
     role: 0,
-    description: "Search and send a random TikTok anime-edit video — runs entirely in-bot via @tobyg74/tiktok-api-dl, no third-party hosted API",
-    category: "anime",
+    description: "Anime edits from TikTok",
+    category: "media",
     guide: {
-      en: "{p}{n} [query]",
-    },
+      en: "{pn} [anime name]"
+    }
   },
 
-  onStart: async function ({ api, event, args }) {
+  onStart: async function ({ api, event, args, message }) {
+    const query = args.join(" ");
+    if (!query) return message.reply(serifBold("𝐏𝐥𝐞𝐚𝐬𝐞 𝐩𝐫𝐨𝐯𝐢𝐝𝐞 𝐚𝐧 𝐚𝐧𝐢𝐦𝐞 𝐧𝐚𝐦𝐞! 🌸"));
+
     api.setMessageReaction("✨", event.messageID, () => {}, true);
 
-    const query = args.join(' ').trim();
-    if (!query) {
-      return api.sendMessage("দয়া করে একটা সার্চ কিওয়ার্ড দিন। যেমন: anisr naruto", event.threadID, event.messageID);
-    }
+    const cacheDir = path.join(__dirname, 'cache');
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
+    const pathVideo = path.join(cacheDir, `anisr_${Date.now()}.mp4`);
 
-    const cookie = getCookie();
-    if (!cookie) {
-      return api.sendMessage(
-        "⚠️ TikTok cookie সেট করা নেই।\n\n" +
-        "tiktokCookie.json ফাইলে গিয়ে আপনার নিজের TikTok cookie বসান, তারপর আবার চেষ্টা করুন।",
-        event.threadID, event.messageID
-      );
-    }
-
-    const searchQuery = `${query} anime edit`;
-    let result;
     try {
-      result = await Tiktok.Search(searchQuery, {
-        type: "video",
-        page: 1,
-        cookie,
+      const searchTerms = `${query} anime edit amv no watermark`;
+
+      const res = await axios.get(`https://azadx69x-tiktok-api.vercel.app/tiktok/search`, {
+        params: { query: searchTerms },
+        timeout: 15000
       });
-    } catch (e) {
-      console.error('anisr: search failed:', e.message);
-      return api.sendMessage(
-        `সার্চ ব্যর্থ হয়েছে: ${e.message}\n\nকুকির মেয়াদ শেষ হয়ে থাকতে পারে — নতুন কুকি নিয়ে tiktokCookie.json আপডেট করুন।`,
-        event.threadID, event.messageID
-      );
+
+      const rawVideos = res.data?.list;
+
+      if (!rawVideos || rawVideos.length === 0) {
+        api.setMessageReaction("❌", event.messageID, () => {}, true);
+        return message.reply(serifBold(""));
+      }
+
+      const videos = rawVideos.filter(v => !isTutorialVideo(v));
+
+      const getVideoId = (v) => v.video_id || v.id || v.url;
+
+      let selectedVideo = videos.find(v => !global.instaMemory.has(getVideoId(v)));
+      if (!selectedVideo) {
+        global.instaMemory.clear();
+        selectedVideo = videos[0];
+      }
+      global.instaMemory.add(getVideoId(selectedVideo));
+
+      const downloadUrl = selectedVideo.noWatermark || selectedVideo.play || selectedVideo.wmplay;
+
+      const videoResponse = await axios({
+        method: 'get',
+        url: downloadUrl,
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+
+      await fs.writeFile(pathVideo, Buffer.from(videoResponse.data));
+
+      await message.reply({
+        body: serifBold(`• 𝐇𝐞𝐫𝐞 𝐢𝐬 𝐲𝐨𝐮𝐫 𝐯𝐢𝐝𝐞𝐨 𝐛𝐚𝐛𝐲  <😘`),
+        attachment: fs.createReadStream(pathVideo)
+      });
+
+      api.setMessageReaction("🌸", event.messageID, () => {}, true);
+
+    } catch (err) {
+      console.error("DEBUG ERROR:", err.message);
+      api.setMessageReaction("⚠️", event.messageID, () => {}, true);
+
+      const errorMsg = err.code === 'ECONNABORTED'
+        ? "⚠️ | 𝐂𝐨𝐧𝐧𝐞𝐜𝐭𝐢𝐨𝐧 𝐭𝐢𝐦𝐞𝐝 𝐨𝐮𝐭. 𝐓𝐫𝐲 𝐚𝐠𝐚𝐢𝐧!"
+        : "⚠️ | 𝐒𝐞𝐫𝐯𝐞𝐫 𝐢𝐬 𝐛𝐮𝐬𝐲 𝐨𝐫 𝐀𝐏𝐈 𝐢𝐬 𝐝𝐨𝐰𝐧. 𝐓𝐫𝐲 𝐚𝐠𝐚𝐢𝐧!";
+
+      return message.reply(serifBold(errorMsg));
+    } finally {
+      if (fs.existsSync(pathVideo)) {
+        setTimeout(() => {
+          try { fs.unlinkSync(pathVideo); } catch(e) {}
+        }, 20000);
+      }
     }
-
-    if (!result || result.status !== 'success' || !Array.isArray(result.result) || result.result.length === 0) {
-      return api.sendMessage(
-        `"${query}"-এর জন্য কোনো ভিডিও পাওয়া যায়নি।\n` +
-        (result && result.message ? `কারণ: ${result.message}` : 'অন্য কিওয়ার্ড দিয়ে চেষ্টা করুন, অথবা কুকি এখনো ভ্যালিড কিনা যাচাই করুন।'),
-        event.threadID, event.messageID
-      );
-    }
-
-    const videos = result.result;
-    const selected = videos[Math.floor(Math.random() * videos.length)];
-    const videoUrl = (selected.video && (selected.video.playAddr || selected.video.downloadAddr)) || null;
-    const title = selected.desc || "No title available";
-    const author = (selected.author && (selected.author.nickname || selected.author.uniqueId)) || "Unknown";
-
-    if (!videoUrl) {
-      return api.sendMessage("ভিডিও লিংক পাওয়া যায়নি এই রেজাল্টে, আবার চেষ্টা করুন।", event.threadID, event.messageID);
-    }
-
-    const tempPath = path.join(__dirname, 'cache', `anisr_${Date.now()}.mp4`);
-
-    try {
-      fs.ensureDirSync(path.join(__dirname, 'cache'));
-      await downloadVideoToFile(videoUrl, tempPath, cookie);
-
-      api.sendMessage(
-        {
-          body: `🎥 ${title}\n👤 By: ${author}\n\nএখানে আপনার ভিডিও!`,
-          attachment: fs.createReadStream(tempPath),
-        },
-        event.threadID,
-        () => fs.unlink(tempPath).catch(() => {}),
-        event.messageID
-      );
-    } catch (e) {
-      console.error('anisr: video download/send failed:', e.message);
-      fs.unlink(tempPath).catch(() => {});
-      api.sendMessage(
-        `ভিডিওটা পাঠাতে ব্যর্থ হয়েছে।\nকারণ: ${e.message}\n\nআবার চেষ্টা করুন।`,
-        event.threadID, event.messageID
-      );
-    }
-  },
+  }
 };
+
+function serifBold(text) {
+  const letters = {
+    'a': '𝐚', 'b': '𝐛', 'c': '𝐜', 'd': '𝐝', 'e': '𝐞', 'f': '𝐟', 'g': '𝐠', 'h': '𝐡', 'i': '𝐢', 'j': '𝐣', 'k': '𝐤', 'l': '𝐥', 'm': '𝐦',
+    'n': '𝐧', 'o': '𝐨', 'p': '𝐩', 'q': '𝐪', 'r': '𝐫', 's': '𝐬', 't': '𝐭', 'u': '𝐮', 'v': '𝐯', 'w': '𝐰', 'x': '𝐱', 'y': '𝐲', 'z': '𝐳',
+    'A': '𝐀', 'B': '𝐁', 'C': '𝐂', 'D': '𝐃', 'E': '𝐄', 'F': '𝐅', 'G': '𝐆', 'H': '𝐇', 'I': '𝐈', 'J': '𝐉', 'K': '𝐊', 'L': '𝐋', 'M': '𝐌',
+    'N': '𝐍', 'O': '𝐎', 'P': '𝐏', 'Q': '𝐐', 'R': '𝐑', 'S': '𝐒', 'T': '𝐓', 'U': '𝐔', 'V': '𝐕', 'W': '𝐖', 'X': '𝐗', 'Y': '𝐘', 'Z': '𝐙',
+    '0': '𝟎', '1': '𝟏', '2': '𝟐', '3': '𝟑', '4': '𝟒', '5': '𝟓', '6': '𝟔', '7': '𝟕', '8': '𝟖', '9': '𝟗'
+  };
+  return text.split('').map(char => letters[char] || char).join('');
+                               }
