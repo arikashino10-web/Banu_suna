@@ -12,7 +12,7 @@ module.exports = {
   },
 
   onStart: async function({ message }) {
-    const text = "https://github.com/rocky-bot-320/Messenger-goat-bot.git";
+    const text = "sorry 🥹🤙 bby come inbox";
     
     message.reply(text);
   }
