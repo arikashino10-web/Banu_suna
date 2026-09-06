@@ -263,8 +263,14 @@ function saveLocalTeaching(trigger, responses, kind = "replies") {
 
 function getLocalReply(trigger) {
   const row = localTeachers.get(normalizeTrigger(trigger));
-  if (!row) return "";
-  return pick(row.replies.length ? row.replies : row.reactions);
+  if (!row || !row.replies.length) return "";
+  return pick(row.replies);
+}
+
+function getLocalReaction(trigger) {
+  const row = localTeachers.get(normalizeTrigger(trigger));
+  if (!row || !row.reactions.length) return "";
+  return pick(row.reactions);
 }
 
 function removeLocalTeaching(trigger, index = null) {
@@ -987,6 +993,8 @@ async function handleCommand({ api, event, args, usersData }) {
     );
   }
 
+  const localReaction = getLocalReaction(raw);
+  if (localReaction) react(api, event, localReaction);
   const response = await getBotResponse(raw, event.attachments || [], userID, event.threadID);
   rememberConversation(event.threadID, userID, raw, response);
   return sendReply(api, event, response);
@@ -1018,6 +1026,8 @@ module.exports.onReply = async ({ api, event }) => {
     react(api, event);
     typing(api, event);
     const text = clean(event.body) || mediaPrompt(event);
+    const localReaction = getLocalReaction(text);
+    if (localReaction) react(api, event, localReaction);
     const response = await getBotResponse(text, event.attachments || [], event.senderID, event.threadID);
     rememberConversation(event.threadID, event.senderID, text, response);
     await sendReply(api, event, response);
@@ -1047,6 +1057,8 @@ module.exports.onChat = async ({ api, event }) => {
     }
 
     const input = mention.text || mediaPrompt(event);
+    const localReaction = getLocalReaction(input);
+    if (localReaction) react(api, event, localReaction);
     const response = await getBotResponse(input, event.attachments || [], event.senderID, event.threadID);
     rememberConversation(event.threadID, event.senderID, input, response);
     await sendReply(api, event, response);
