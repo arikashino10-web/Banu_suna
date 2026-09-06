@@ -35,7 +35,6 @@
     "moment-timezone": "^0.5.34",
     "mongoose": "^9.0.0",
     "mqtt": "^4.3.7",
-    "@lazyneoaz/metachat": "^1.1.6",
     "node-cron": "^3.0.2",
     "npmlog": "^7.0.1",
     "ora": "^5.4.1",
@@ -55,7 +54,8 @@
     "websocket-stream": "^5.5.2",
     "yt-search": "^2.13.1",
     "node-schedule": "^2.1.1",
-    "chalk": "^4.1.2"
+    "chalk": "^4.1.2",
+    "shadowx-fca": "^10.2.0"
   },
   "scripts": {
     "start": "node index.js",
