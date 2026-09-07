@@ -390,12 +390,17 @@ function extractText(data) {
     data.result,
     data.content,
     data.text,
+    data.data,
     data.data?.answer,
     data.data?.result,
     data.data?.content,
     data.data?.message,
     data.data?.reply,
     data.data?.response,
+    data.data?.text,
+    data.output,
+    data.data?.output,
+    data.body,
     data.choices?.[0]?.message?.content,
     data.data?.choices?.[0]?.message?.content
   ];
@@ -716,7 +721,7 @@ async function teach(trigger, responses, userID, threadID, isIntro = false) {
     userID
   };
 
-  return firstSuccessful("Teaching", [
+  const remoteRequests = [
     async () => legacyRequest({
       teach: payload.trigger,
       reply: payload.responses,
@@ -725,7 +730,18 @@ async function teach(trigger, responses, userID, threadID, isIntro = false) {
       ...(isIntro ? { key: "intro" } : {})
     }),
     async () => hinataRequest("POST", "/api/jan/teach", payload)
-  ]);
+  ];
+
+  // Local teaching is the guaranteed offline backup. Sync remotely in the background
+  // when possible, without making the command fail when third-party APIs are down.
+  if (local.saved) {
+    Promise.resolve()
+      .then(() => firstSuccessful("Teaching sync", remoteRequests))
+      .catch((error) => console.error("[bby:teaching-sync]", asError(error)));
+    return { data: { message: "Local teaching saved; remote sync queued", count: local.count } };
+  }
+
+  return firstSuccessful("Teaching", remoteRequests);
 }
 
 async function teachReaction(trigger, reactions, userID, threadID) {
@@ -739,7 +755,7 @@ async function teachReaction(trigger, reactions, userID, threadID) {
     threadID
   };
 
-  return firstSuccessful("Reaction teaching", [
+  const remoteRequests = [
     async () => legacyRequest({
       teach: value.trigger,
       react: value.reactions,
@@ -751,7 +767,16 @@ async function teachReaction(trigger, reactions, userID, threadID) {
       responses: value.reactions,
       userID
     })
-  ]);
+  ];
+
+  if (local.saved) {
+    Promise.resolve()
+      .then(() => firstSuccessful("Reaction teaching sync", remoteRequests))
+      .catch((error) => console.error("[bby:reaction-sync]", asError(error)));
+    return { data: { message: "Local reaction teaching saved; remote sync queued", count: local.count } };
+  }
+
+  return firstSuccessful("Reaction teaching", remoteRequests);
 }
 
 async function removeReply(trigger, index, userID) {
