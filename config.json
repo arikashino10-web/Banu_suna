@@ -13,8 +13,10 @@
   "language": "en",
   "notesLanguage": "change to your language with ISO 639-1 code, available languages: vi (Vietnamese), en (English)",
   "nickNameBot": "⤾➝Mommy NICO ROBIN↬⤹🪼🩷🪻⇣",
-  "prefix": ".", 
-  "reactUnsend": ["🤠"],
+  "prefix": ".",
+  "reactUnsend": [
+    "🤠"
+  ],
   "adminOnly": {
     "enable": false,
     "ignoreCommand": []
@@ -136,7 +138,7 @@
     "presence": false
   },
   "optionsFca": {
-    "forceLogin": true,
+    "forceLogin": false,
     "listenEvents": true,
     "updatePresence": true,
     "listenTyping": true,
@@ -146,5 +148,6 @@
     "autoMarkDelivery": false,
     "autoReconnect": false,
     "notes": "Document here: https://github.com/NeoKEX/fca-neokex/README.md"
-  }
+  },
+  "fcaAppStateSaveInterval": 600000
 }
