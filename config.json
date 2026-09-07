@@ -15,10 +15,10 @@
   "nickNameBot": "⤾➝Mommy NICO ROBIN↬⤹🪼🩷🪻⇣",
   "prefix": ".",
   "reactUnsend": [
-    "🤠"
+    "😡,🤬"
   ],
   "adminOnly": {
-    "enable": false,
+    "enable": true,
     "ignoreCommand": []
   },
   "adminBot": [
