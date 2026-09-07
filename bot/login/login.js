@@ -718,6 +718,21 @@ async function startBot(loginWithEmail) {
                         global.GoatBot.fcaApi = api;
                         global.GoatBot.botID = api.getCurrentUserID();
                         log.info("LOGIN FACEBOOK", getText('login', 'loginSuccess'));
+
+                        // Persist the latest valid appState periodically so restarts can reuse it.
+                        clearInterval(global.intervalSaveFcaAppState);
+                        const appStateSaveInterval = Math.max(60000, Number(global.GoatBot.config.fcaAppStateSaveInterval) || 600000);
+                        global.intervalSaveFcaAppState = setInterval(() => {
+                                try {
+                                        if (typeof api.getAppState !== "function") return;
+                                        const latestAppState = api.getAppState();
+                                        if (Array.isArray(latestAppState) && latestAppState.length > 0)
+                                                writeFileSync(dirAccount, JSON.stringify(filterKeysAppState(latestAppState), null, 2));
+                                }
+                                catch (err) {
+                                        log.warn("LOGIN FACEBOOK", "Could not persist latest appState", err.message);
+                                }
+                        }, appStateSaveInterval);
                         let hasBanned = false;
                         global.botID = api.getCurrentUserID();
                         logColor("#f5ab00", createLine("BOT INFO"));
