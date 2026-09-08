@@ -27,8 +27,14 @@ module.exports = {
 	},
 
 	onStart: async function ({ message, event, api, getLang }) {
-		if (!event.messageReply || event.messageReply.senderID != api.getCurrentUserID())
+		if (!event.messageReply || String(event.messageReply.senderID) !== String(api.getCurrentUserID()))
 			return message.reply(getLang("syntaxError"));
-		message.unsend(event.messageReply.messageID);
+
+		try {
+			await api.unsendMessage(event.messageReply.messageID);
+		}
+		catch (error) {
+			return message.reply("✖ Unable to unsend that message: " + (error.message || "unknown error"));
+		}
 	}
 };
