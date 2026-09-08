@@ -165,7 +165,7 @@ module.exports = {
 
   onReaction: async function ({ Reaction, event, message, api }) {
 
-    if (event.userID !== Reaction.author) return;
+    if (String(event.userID ?? event.author ?? "") !== String(Reaction.author)) return;
 
     const { rawCode, fileName } = Reaction.data;
 
@@ -180,6 +180,8 @@ module.exports = {
       configCommands,
       api
     );
+
+    Reaction.delete?.();
 
     if (load.status === "success") {
       message.reply(
