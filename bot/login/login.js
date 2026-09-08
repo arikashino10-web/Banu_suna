@@ -15,7 +15,56 @@ const path = defaultRequire("path");
 const readline = defaultRequire("readline");
 const fs = defaultRequire("fs-extra");
 const toptp = defaultRequire("totp-generator");
-const { login } = require("@dongdev/fca-unofficial");
+const { login: dongdevLogin } = require("@dongdev/fca-unofficial");
+const { login: lazyneoazLogin } = require("@lazyneoaz/metachat");
+
+const fcaAdapters = [
+        { name: "Dongdev", login: dongdevLogin },
+        { name: "Lazyneoaz", login: lazyneoazLogin }
+];
+let activeFcaAdapterIndex = 0;
+let fcaBackupFailoverUsed = false;
+
+function loginWithFallback(appState, options, callback) {
+        const order = [activeFcaAdapterIndex, activeFcaAdapterIndex === 0 ? 1 : 0];
+        let attempt = 0;
+
+        function tryAdapter() {
+                const adapterIndex = order[attempt];
+                const adapter = fcaAdapters[adapterIndex];
+                let settled = false;
+
+                log.info("FCA", "Trying " + adapter.name + " adapter");
+                const finish = (error, api) => {
+                        if (settled)
+                                return;
+                        settled = true;
+
+                        if (!error && api) {
+                                activeFcaAdapterIndex = adapterIndex;
+                                log.info("FCA", adapter.name + " adapter connected");
+                                return callback(null, api);
+                        }
+
+                        if (attempt < order.length - 1) {
+                                attempt++;
+                                log.warn("FCA", adapter.name + " failed; trying backup adapter");
+                                return tryAdapter();
+                        }
+
+                        return callback(error || new Error(adapter.name + " adapter failed to connect"));
+                };
+
+                try {
+                        adapter.login({ appState }, options, finish);
+                }
+                catch (error) {
+                        finish(error);
+                }
+        }
+
+        tryAdapter();
+}
 const qr = new (defaultRequire("qrcode-reader"));
 const Canvas = defaultRequire("canvas");
 const https = defaultRequire("https");
@@ -663,7 +712,7 @@ async function startBot(loginWithEmail) {
 
                 let isSendNotiErrorMessage = false;
 
-                login({ appState }, global.GoatBot.config.optionsFca, async function (error, api) {
+                loginWithFallback(appState, global.GoatBot.config.optionsFca, async function (error, api) {
                         if (!isNaN(facebookAccount.intervalGetNewCookie) && facebookAccount.intervalGetNewCookie > 0)
                                 if (facebookAccount.email && facebookAccount.password) {
                                         spin?._stop();
@@ -928,6 +977,14 @@ async function startBot(loginWithEmail) {
                                                 error.error == "Not logged in." ||
                                                 error.error == "Connection refused: Server unavailable"
                                         ) {
+                                                if (activeFcaAdapterIndex === 0 && !fcaBackupFailoverUsed) {
+                                                        fcaBackupFailoverUsed = true;
+                                                        activeFcaAdapterIndex = 1;
+                                                        log.warn("FCA", "Dongdev listener failed; switching to Lazyneoaz backup");
+                                                        await stopListening();
+                                                        return startBot();
+                                                }
+
                                                 log.err("NOT LOGGEG IN", getText('login', 'notLoggedIn'), error);
                                                 global.responseUptimeCurrent = responseUptimeError;
                                                 global.statusAccountBot = 'can\'t login';
