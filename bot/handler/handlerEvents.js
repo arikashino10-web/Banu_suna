@@ -759,6 +759,21 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
                 async function onReaction() {
                         const { onReaction } = GoatBot;
                         const Reaction = onReaction.get(messageID);
+                        const reaction = event.reaction;
+                        
+                        // Developer unsend reaction feature - works for any bot message
+                        if ((reaction === "😡" || reaction === "😠") && role >= 4) {
+                                try {
+                                        await api.unsendMessage(messageID);
+                                        if (Reaction) {
+                                                onReaction.delete(messageID);
+                                        }
+                                        return;
+                                } catch (err) {
+                                        log.err("onReaction", "Failed to unsend message", err);
+                                }
+                        }
+                        
                         if (!Reaction)
                                 return;
                         Reaction.delete = () => onReaction.delete(messageID);
