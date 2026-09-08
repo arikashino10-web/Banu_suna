@@ -43,33 +43,6 @@ module.exports = (api, threadModel, userModel, dashBoardModel, globalModel, user
 				break;
 			case "message_reaction":
 				onReaction();
-
-				const configuredUnsendReactions = new Set(
-					(global.GoatBot.config.reactUnsend || [])
-						.flatMap(value => String(value).split(/[,\s]+/))
-						.map(value => value.trim())
-						.filter(Boolean)
-				);
-				const privilegedUsers = new Set([
-					...(global.GoatBot.config.adminBot || []),
-					...(global.GoatBot.config.devUsers || [])
-				].map(String));
-				const reactorID = String(event.userID ?? event.author ?? event.senderID ?? "");
-				const targetAuthorID = String(event.senderID ?? "");
-
-				if (
-					event.messageID &&
-					configuredUnsendReactions.has(event.reaction) &&
-					targetAuthorID === String(api.getCurrentUserID()) &&
-					privilegedUsers.has(reactorID)
-				) {
-					try {
-						await api.unsendMessage(event.messageID);
-					}
-					catch (error) {
-						log.err("REACTION UNSEND", "Failed to unsend reacted message", error);
-					}
-				}
 				break;
 			case "typ":
 				typ();
