@@ -24,6 +24,8 @@
  */
 
 const axios = require("axios");
+const fs = require("fs-extra");
+const path = require("path");
 
 const SETTINGS = Object.freeze({
   requestTimeout: 15000,
@@ -92,16 +94,239 @@ const baseCache = {
 };
 
 const lastRequestAt = new Map();
+const handledEvents = new Map();
+
+function claimEvent(event) {
+  const id = event?.messageID || event?.messageId;
+  if (!id) return true;
+  const key = String(id);
+  if (handledEvents.has(key)) return false;
+  handledEvents.set(key, true);
+  setTimeout(() => handledEvents.delete(key), 60000);
+  return true;
+}
+
+const MEMORY_FILE = path.join(__dirname, "cache", "bby_conversation_memory.json");
+const MAX_MEMORY_WORDS = 30000;
+const MAX_MEMORY_ENTRIES = 5000;
+const conversationMemory = new Map();
+let memorySaveTimer = null;
+
+// Local teaching storage keeps the command useful even when third-party APIs change.
+const LOCAL_TEACH_FILE = path.join(__dirname, "cache", "bby_teach.json");
+const localTeachers = new Map();
+let teacherSaveTimer = null;
+
+function wordCount(value) {
+  return clean(value).split(/\s+/).filter(Boolean).length;
+}
+
+function loadConversationMemory() {
+  try {
+    if (!fs.existsSync(MEMORY_FILE)) return;
+    const data = fs.readJsonSync(MEMORY_FILE);
+    if (!data || typeof data !== "object") return;
+    for (const [threadID, entries] of Object.entries(data)) {
+      if (Array.isArray(entries)) conversationMemory.set(threadID, entries.slice(-MAX_MEMORY_ENTRIES));
+    }
+  } catch (error) {
+    console.error("[bby:memory-load]", error.message);
+  }
+}
+
+function persistConversationMemory() {
+  try {
+    fs.ensureDirSync(path.dirname(MEMORY_FILE));
+    const data = Object.fromEntries(conversationMemory);
+    fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 });
+  } catch (error) {
+    console.error("[bby:memory-save]", error.message);
+  }
+}
+
+function scheduleMemorySave() {
+  if (memorySaveTimer) clearTimeout(memorySaveTimer);
+  memorySaveTimer = setTimeout(() => {
+    memorySaveTimer = null;
+    persistConversationMemory();
+  }, 1000);
+}
+
+function trimThreadMemory(threadID) {
+  const key = String(threadID);
+  const entries = conversationMemory.get(key) || [];
+  let totalWords = entries.reduce((sum, item) => sum + wordCount(item.input) + wordCount(item.response), 0);
+  while (entries.length > MAX_MEMORY_ENTRIES || totalWords > MAX_MEMORY_WORDS) {
+    const removed = entries.shift();
+    totalWords -= wordCount(removed?.input) + wordCount(removed?.response);
+  }
+  conversationMemory.set(key, entries);
+}
+
+function rememberConversation(threadID, userID, input, response) {
+  if (!threadID || !clean(input)) return;
+  const key = String(threadID);
+  const entries = conversationMemory.get(key) || [];
+  entries.push({
+    userID: String(userID || ""),
+    input: clean(input).slice(0, 5000),
+    response: clean(response).slice(0, 5000),
+    time: new Date().toISOString()
+  });
+  conversationMemory.set(key, entries);
+  trimThreadMemory(key);
+  scheduleMemorySave();
+}
+
+function getMemoryContext(threadID, maxWords = 2000) {
+  const entries = conversationMemory.get(String(threadID)) || [];
+  const selected = [];
+  let totalWords = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const item = entries[index];
+    const line = "User: " + item.input + "\\nBaby: " + item.response;
+    const count = wordCount(line);
+    if (selected.length && totalWords + count > maxWords) break;
+    selected.unshift(line);
+    totalWords += count;
+  }
+  return selected.join("\\n");
+}
+
+function normalizeTrigger(value) {
+  return lower(value).replace(/\s+/g, " ").replace(/^[,،]+|[,،]+$/g, "");
+}
+
+function normalizeResponses(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .flatMap((item) => String(item == null ? "" : item).split(/\s*,\s*/))
+    .map(clean)
+    .filter(Boolean)
+    .map((item) => item.slice(0, SETTINGS.maxReplyLength))
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function loadLocalTeaching() {
+  try {
+    if (!fs.existsSync(LOCAL_TEACH_FILE)) return;
+    const data = fs.readJsonSync(LOCAL_TEACH_FILE);
+    if (!data || typeof data !== "object") return;
+    for (const [trigger, value] of Object.entries(data)) {
+      const key = normalizeTrigger(trigger);
+      if (!key) continue;
+      const row = {
+        replies: normalizeResponses(value?.replies || value?.responses),
+        reactions: normalizeResponses(value?.reactions),
+        updatedAt: value?.updatedAt || null
+      };
+      if (row.replies.length || row.reactions.length) localTeachers.set(key, row);
+    }
+  } catch (error) {
+    console.error("[bby:teacher-load]", error.message);
+  }
+}
+
+function persistLocalTeaching() {
+  try {
+    fs.ensureDirSync(path.dirname(LOCAL_TEACH_FILE));
+    fs.writeJsonSync(LOCAL_TEACH_FILE, Object.fromEntries(localTeachers), { spaces: 2 });
+  } catch (error) {
+    console.error("[bby:teacher-save]", error.message);
+  }
+}
+
+function scheduleTeacherSave() {
+  if (teacherSaveTimer) clearTimeout(teacherSaveTimer);
+  teacherSaveTimer = setTimeout(() => {
+    teacherSaveTimer = null;
+    persistLocalTeaching();
+  }, 500);
+}
+
+function saveLocalTeaching(trigger, responses, kind = "replies") {
+  const key = normalizeTrigger(trigger);
+  const values = normalizeResponses(responses);
+  if (!key || !values.length) return { saved: false, count: 0 };
+
+  const row = localTeachers.get(key) || { replies: [], reactions: [], updatedAt: null };
+  const bucket = kind === "reactions" ? row.reactions : row.replies;
+  for (const value of values) {
+    if (!bucket.some((item) => lower(item) === lower(value))) bucket.push(value);
+  }
+  row.updatedAt = new Date().toISOString();
+  localTeachers.set(key, row);
+  scheduleTeacherSave();
+  return { saved: true, added: values.length, count: row.replies.length + row.reactions.length };
+}
+
+function getLocalReply(trigger) {
+  const row = localTeachers.get(normalizeTrigger(trigger));
+  if (!row || !row.replies.length) return "";
+  return pick(row.replies);
+}
+
+function getLocalReaction(trigger) {
+  const row = localTeachers.get(normalizeTrigger(trigger));
+  if (!row || !row.reactions.length) return "";
+  return pick(row.reactions);
+}
+
+function removeLocalTeaching(trigger, index = null) {
+  const key = normalizeTrigger(trigger);
+  const row = localTeachers.get(key);
+  if (!row) return { changed: false };
+  if (index === null || index === undefined) {
+    localTeachers.delete(key);
+    scheduleTeacherSave();
+    return { changed: true, all: true };
+  }
+
+  const bucket = row.replies.length ? row.replies : row.reactions;
+  const number = Number(index);
+  const position = number > 0 ? number - 1 : 0;
+  if (!Number.isInteger(position) || position < 0 || position >= bucket.length) return { changed: false };
+  bucket.splice(position, 1);
+  if (!row.replies.length && !row.reactions.length) localTeachers.delete(key);
+  else localTeachers.set(key, row);
+  scheduleTeacherSave();
+  return { changed: true, all: false };
+}
+
+function editLocalTeaching(trigger, replacement) {
+  const key = normalizeTrigger(trigger);
+  const row = localTeachers.get(key);
+  const values = normalizeResponses(replacement);
+  if (!row || !values.length) return { changed: false };
+  row.replies = values;
+  row.updatedAt = new Date().toISOString();
+  localTeachers.set(key, row);
+  scheduleTeacherSave();
+  return { changed: true };
+}
+
+function getLocalTeacherList() {
+  return [...localTeachers.entries()]
+    .map(([id, row]) => ({ id, count: (row.replies?.length || 0) + (row.reactions?.length || 0) }))
+    .filter((row) => row.count > 0)
+    .sort((a, b) => b.count - a.count);
+}
+
+loadConversationMemory();
+loadLocalTeaching();
+
 
 module.exports.config = {
   name: "bby",
   aliases: SETTINGS.aliases,
-  version: "8.0.0",
+  version: "8.1.0",
   author: "Advanced merge",
   countDown: 2,
   role: 0,
   description: "Advanced Baby AI chat, teaching, replies, reactions and media support",
   category: "chat",
+  usePrefix: false,
   guide: {
     en: [
       "{pn} <message>",
@@ -145,65 +370,91 @@ function asError(error) {
     "Unknown API error";
 }
 
+function isHtmlDocument(value) {
+  const text = clean(value);
+  return /^<!doctype html[\s>]/i.test(text) || /^<html[\s>]/i.test(text);
+}
+
 function extractText(data) {
-  if (typeof data === "string") return clean(data);
+  if (typeof data === "string") {
+    const text = clean(data);
+    return isHtmlDocument(text) || isBadRemoteReply(text) ? "" : text;
+  }
   if (!data || typeof data !== "object") return "";
 
   const candidates = [
     data.message,
     data.reply,
     data.response,
+    data.answer,
+    data.result,
+    data.content,
     data.text,
+    data.data,
+    data.data?.answer,
+    data.data?.result,
+    data.data?.content,
     data.data?.message,
     data.data?.reply,
-    data.data?.response
+    data.data?.response,
+    data.data?.text,
+    data.output,
+    data.data?.output,
+    data.body,
+    data.choices?.[0]?.message?.content,
+    data.data?.choices?.[0]?.message?.content
   ];
 
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
       const text = candidate.map(clean).filter(Boolean).join("\n");
-      if (text) return text;
+      if (text && !isBadRemoteReply(text)) return text;
     } else if (clean(candidate)) {
-      return clean(candidate);
+      const text = clean(candidate);
+      if (!isHtmlDocument(text) && !isBadRemoteReply(text)) return text;
     }
   }
 
   return "";
 }
 
+function isBadRemoteReply(value) {
+  const text = clean(value);
+  return /install\s+updated\s+bby\.js|raw\.githubusercontent\.com\/.*bby\.js/i.test(text);
+}
+
 function splitReply(text) {
   const value = clean(text);
   if (!value) return ["দুঃখিত, কোনো উত্তর পাওয়া যায়নি।"];
+  if (value.length <= SETTINGS.maxReplyLength) return [value];
 
-  const chunks = [];
-  let remaining = value;
-  while (remaining.length > SETTINGS.maxReplyLength) {
-    let cut = remaining.lastIndexOf("\n", SETTINGS.maxReplyLength);
-    if (cut < SETTINGS.maxReplyLength * 0.55) {
-      cut = remaining.lastIndexOf(" ", SETTINGS.maxReplyLength);
-    }
-    if (cut < SETTINGS.maxReplyLength * 0.55) {
-      cut = SETTINGS.maxReplyLength;
-    }
-    chunks.push(remaining.slice(0, cut).trim());
-    remaining = remaining.slice(cut).trim();
+  const suffix = "\n\n… (উত্তরটি সংক্ষিপ্ত করা হয়েছে)";
+  let cut = value.lastIndexOf("\n", SETTINGS.maxReplyLength - suffix.length);
+  if (cut < SETTINGS.maxReplyLength * 0.55) {
+    cut = value.lastIndexOf(" ", SETTINGS.maxReplyLength - suffix.length);
   }
-  if (remaining) chunks.push(remaining);
-  return chunks;
+  if (cut < SETTINGS.maxReplyLength * 0.55) cut = SETTINGS.maxReplyLength - suffix.length;
+  return [value.slice(0, Math.max(1, cut)).trimEnd() + suffix];
 }
 
 function markReply(info, event, extra = {}) {
   const store = global.GoatBot?.onReply;
-  if (!store || typeof store.set !== "function" || !info?.messageID) return;
+  const messageID = info?.messageID || info?.messageId || info?.id || info?.message_id;
+  if (!store || typeof store.set !== "function" || !messageID) return;
 
-  store.set(info.messageID, {
+  const replyData = {
     commandName: module.exports.config.name,
     type: "reply",
-    messageID: info.messageID,
+    messageID,
     author: event.senderID,
     threadID: event.threadID,
     ...extra
-  });
+  };
+
+  // Keep the native key and a string key so adapters that change the ID type
+  // between send and receive still find the reply handler.
+  store.set(messageID, replyData);
+  store.set(String(messageID), replyData);
 }
 
 function sendOne(api, text, event, callback) {
@@ -359,44 +610,83 @@ async function firstSuccessful(label, requests) {
   throw new Error(`${label} unavailable: ${errors[errors.length - 1] || "unknown error"}`);
 }
 
-async function getBotResponse(text, attachments = [], senderID = "") {
+
+
+async function pollinationsRequest(input, context) {
+  const response = await axios.post(
+    "https://text.pollinations.ai/",
+    {
+      messages: [
+        { role: "system", content: "You are Baby AI. Answer briefly and helpfully in the user's language. Recent memory:\\n" + (context || "none") },
+        { role: "user", content: input }
+      ],
+      model: "openai",
+      private: true
+    },
+    { timeout: SETTINGS.requestTimeout, headers: { "Content-Type": "application/json" } }
+  );
+  const message = extractText(response.data);
+  if (!message) throw new Error("Pollinations returned an empty response");
+  return message;
+}
+
+function localFallback(input, threadID) {
+  const recent = getMemoryContext(threadID, 120);
+  const value = lower(input);
+  if (/^(hi|hello|hey|হাই|হ্যালো|সালাম)/i.test(value)) return pick(FALLBACK_MESSAGES);
+  if (/(মনে আছে|আগের কথা|remember|previous|আগে কী বলেছিল)/i.test(value) && recent) {
+    return "API এখন offline, তবে সাম্প্রতিক কথোপকথন মনে আছে:\\n\\n" + recent;
+  }
+  return "আমি এখন offline backup mode-এ আছি। API service ফিরে এলে সম্পূর্ণ AI উত্তর দিতে পারব। আপনার কথাটি মনে রাখা হয়েছে।";
+}
+
+async function getBotResponse(text, attachments = [], senderID = "", threadID = "") {
   const input = clean(text) || "meow";
   const files = Array.isArray(attachments) ? attachments : [];
+  const context = getMemoryContext(threadID, 1800);
+  const learnedReply = getLocalReply(input);
+  if (learnedReply) return learnedReply;
 
-  const response = await firstSuccessful("Baby AI", [
-    async () => {
-      const result = await legacyRequest({
-        text: input.toLocaleLowerCase(),
-        senderID,
-        font: 1
-      });
-      const message = extractText(result.data);
-      if (!message) throw new Error("Ullash/Simsimi API returned an empty response");
-      return message;
-    },
-    async () => {
-      const result = await hinataRequest("POST", "/api/hinata", {
-        text: input,
-        style: SETTINGS.defaultStyle,
-        attachments: files
-      });
-      const message = extractText(result.data);
-      if (!message) throw new Error("Hinata returned an empty response");
-      return message;
-    },
-    async () => {
-      const result = await noobsRequest({
-        text: input.toLocaleLowerCase(),
-        senderID,
-        font: 1
-      });
-      const message = extractText(result.data);
-      if (!message) throw new Error("Fallback API returned an empty response");
-      return message;
-    }
-  ]);
-
-  return response;
+  try {
+    return await firstSuccessful("Baby AI", [
+      async () => {
+        const result = await legacyRequest({
+          text: input.toLocaleLowerCase(),
+          senderID,
+          font: 1
+        });
+        const message = extractText(result.data);
+        if (!message) throw new Error("Ullash/Simsimi API returned an empty response");
+        return message;
+      },
+      async () => {
+        const result = await hinataRequest("POST", "/api/hinata", {
+          text: input,
+          style: SETTINGS.defaultStyle,
+          attachments: files,
+          context
+        });
+        const message = extractText(result.data);
+        if (!message) throw new Error("Hinata returned an empty response");
+        return message;
+      },
+      async () => {
+        const result = await noobsRequest({
+          text: input.toLocaleLowerCase(),
+          senderID,
+          font: 1,
+          context
+        });
+        const message = extractText(result.data);
+        if (!message) throw new Error("Fallback API returned an empty response");
+        return message;
+      },
+      async () => pollinationsRequest(input, context)
+    ]);
+  } catch (error) {
+    console.error("[bby:all-api-failed]", error.message);
+    return localFallback(input, threadID);
+  }
 }
 
 function splitTeachInput(value) {
@@ -422,13 +712,16 @@ function splitTeachInput(value) {
 }
 
 async function teach(trigger, responses, userID, threadID, isIntro = false) {
+  const local = saveLocalTeaching(trigger, responses, "replies");
+  if (local.saved) return { data: { message: "Local teaching saved", count: local.count } };
+
   const payload = {
     trigger: lower(trigger),
     responses: clean(responses),
     userID
   };
 
-  return firstSuccessful("Teaching", [
+  const remoteRequests = [
     async () => legacyRequest({
       teach: payload.trigger,
       reply: payload.responses,
@@ -437,10 +730,24 @@ async function teach(trigger, responses, userID, threadID, isIntro = false) {
       ...(isIntro ? { key: "intro" } : {})
     }),
     async () => hinataRequest("POST", "/api/jan/teach", payload)
-  ]);
+  ];
+
+  // Local teaching is the guaranteed offline backup. Sync remotely in the background
+  // when possible, without making the command fail when third-party APIs are down.
+  if (local.saved) {
+    Promise.resolve()
+      .then(() => firstSuccessful("Teaching sync", remoteRequests))
+      .catch((error) => console.error("[bby:teaching-sync]", asError(error)));
+    return { data: { message: "Local teaching saved; remote sync queued", count: local.count } };
+  }
+
+  return firstSuccessful("Teaching", remoteRequests);
 }
 
 async function teachReaction(trigger, reactions, userID, threadID) {
+  const local = saveLocalTeaching(trigger, reactions, "reactions");
+  if (local.saved) return { data: { message: "Local reaction teaching saved", count: local.count } };
+
   const value = {
     trigger: lower(trigger),
     reactions: clean(reactions),
@@ -448,7 +755,7 @@ async function teachReaction(trigger, reactions, userID, threadID) {
     threadID
   };
 
-  return firstSuccessful("Reaction teaching", [
+  const remoteRequests = [
     async () => legacyRequest({
       teach: value.trigger,
       react: value.reactions,
@@ -460,10 +767,24 @@ async function teachReaction(trigger, reactions, userID, threadID) {
       responses: value.reactions,
       userID
     })
-  ]);
+  ];
+
+  if (local.saved) {
+    Promise.resolve()
+      .then(() => firstSuccessful("Reaction teaching sync", remoteRequests))
+      .catch((error) => console.error("[bby:reaction-sync]", asError(error)));
+    return { data: { message: "Local reaction teaching saved; remote sync queued", count: local.count } };
+  }
+
+  return firstSuccessful("Reaction teaching", remoteRequests);
 }
 
 async function removeReply(trigger, index, userID) {
+  const local = removeLocalTeaching(trigger, index);
+  if (local.changed) {
+    return { data: { message: local.all ? "✅ সব শেখানো উত্তর সরানো হয়েছে।" : "✅ শেখানো উত্তরটি সরানো হয়েছে।" } };
+  }
+
   const normalizedTrigger = lower(trigger);
   if (index !== null && index !== undefined) {
     return firstSuccessful("Removing reply", [
@@ -492,6 +813,9 @@ async function removeReply(trigger, index, userID) {
 }
 
 async function editReply(trigger, replacement, userID) {
+  const local = editLocalTeaching(trigger, replacement);
+  if (local.changed) return { data: { message: "✅ লোকাল শেখানো উত্তর আপডেট হয়েছে।" } };
+
   const oldTrigger = lower(trigger);
   const newResponse = clean(replacement);
 
@@ -509,6 +833,9 @@ async function editReply(trigger, replacement, userID) {
 }
 
 async function lookupMessage(trigger) {
+  const local = getLocalReply(trigger);
+  if (local) return { data: { message: local } };
+
   const value = lower(trigger);
   return firstSuccessful("Message lookup", [
     async () => legacyRequest({ list: value }),
@@ -519,6 +846,16 @@ async function lookupMessage(trigger) {
 }
 
 async function getList(all = false) {
+  const local = getLocalTeacherList();
+  if (local.length) {
+    return {
+      data: {
+        data: Object.fromEntries(local.map((row) => [row.id, row.count])),
+        count: local.length
+      }
+    };
+  }
+
   return firstSuccessful("Teacher list", [
     async () => legacyRequest({ list: "all" }),
     async () => hinataRequest("GET", `/api/jan${all ? "/list/all" : "/list"}`)
@@ -681,12 +1018,16 @@ async function handleCommand({ api, event, args, usersData }) {
     );
   }
 
-  const response = await getBotResponse(raw, event.attachments || [], userID);
+  const localReaction = getLocalReaction(raw);
+  if (localReaction) react(api, event, localReaction);
+  const response = await getBotResponse(raw, event.attachments || [], userID, event.threadID);
+  rememberConversation(event.threadID, userID, raw, response);
   return sendReply(api, event, response);
 }
 
 module.exports.onStart = async (context) => {
   const { api, event } = context;
+  if (!claimEvent(event)) return;
   if (!checkCooldown(event, "command")) return;
 
   try {
@@ -702,14 +1043,18 @@ module.exports.onStart = async (context) => {
 };
 
 module.exports.onReply = async ({ api, event }) => {
-  if (event.type !== "message_reply") return;
+  if (!event.messageReply && event.type !== "message_reply") return;
+  if (!claimEvent(event)) return;
   if (!checkCooldown(event, "reply")) return;
 
   try {
     react(api, event);
     typing(api, event);
     const text = clean(event.body) || mediaPrompt(event);
-    const response = await getBotResponse(text, event.attachments || [], event.senderID);
+    const localReaction = getLocalReaction(text);
+    if (localReaction) react(api, event, localReaction);
+    const response = await getBotResponse(text, event.attachments || [], event.senderID, event.threadID);
+    rememberConversation(event.threadID, event.senderID, text, response);
     await sendReply(api, event, response);
   } catch (error) {
     console.error("[bby:onReply]", error);
@@ -721,6 +1066,7 @@ module.exports.onReply = async ({ api, event }) => {
 
 module.exports.onChat = async ({ api, event }) => {
   if (event.type === "message_reply") return;
+  if (!claimEvent(event)) return;
 
   const mention = findMentionPrefix(event.body);
   if (!mention) return;
@@ -736,7 +1082,10 @@ module.exports.onChat = async ({ api, event }) => {
     }
 
     const input = mention.text || mediaPrompt(event);
-    const response = await getBotResponse(input, event.attachments || [], event.senderID);
+    const localReaction = getLocalReaction(input);
+    if (localReaction) react(api, event, localReaction);
+    const response = await getBotResponse(input, event.attachments || [], event.senderID, event.threadID);
+    rememberConversation(event.threadID, event.senderID, input, response);
     await sendReply(api, event, response);
   } catch (error) {
     console.error("[bby:onChat]", error);
