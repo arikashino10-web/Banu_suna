@@ -55,7 +55,8 @@
     "yt-search": "^2.13.1",
     "node-schedule": "^2.1.1",
     "chalk": "^4.1.2",
-    "@dongdev/fca-unofficial": "^4.0.3"
+    "@dongdev/fca-unofficial": "^4.0.3",
+    "@lazyneoaz/metachat": "^1.1.6"
   },
   "scripts": {
     "start": "node index.js",
