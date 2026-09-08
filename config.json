@@ -14,7 +14,15 @@
   "notesLanguage": "change to your language with ISO 639-1 code, available languages: vi (Vietnamese), en (English)",
   "nickNameBot": "⤾➝Mommy NICO ROBIN↬⤹🪼🩷🪻⇣",
   "prefix": ".",
-  "reactUnsend": ["🤠", "😡", "🤬", "😠"],
+  "reactUnsend": {
+    "enable": true,
+    "onlyAdmin": true,
+    "emojis": [
+      "😡",
+      "🤬"
+    ],
+    "notes": "If enable = true, bot will unsend any message reacted with these emojis. If onlyAdmin = true, only adminBot IDs can trigger it."
+  },
   "adminOnly": {
     "enable": false,
     "ignoreCommand": []
@@ -147,5 +155,9 @@
     "autoReconnect": false,
     "notes": "Document here: https://github.com/NeoKEX/fca-neokex/README.md"
   },
-  "fcaAppStateSaveInterval": 600000
+  "fcaAppStateSaveInterval": 600000,
+  "noPrefix": {
+    "enable": false,
+    "notes": "true = only bot admins can use commands without prefix | false = everyone must use prefix"
+  }
 }
