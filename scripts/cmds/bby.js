@@ -1,1096 +1,387 @@
-/**
- * bby.js — Advanced Baby / Hinata chat command for GoatBot
- *
- * Combined and hardened from the three implementations in:
- * https://paste.centos.org/view/7a9e5f32
- *
- * Requires:
- *   npm install axios
- *
- * Supported:
- *   bby <message>
- *   bby teach <question> - <reply1>, <reply2>
- *   bby teach react <question> - <reaction1>, <reaction2>
- *   bby teach amar <question> - <reply>
- *   bby remove <question>
- *   bby rm <question> - <index>
- *   bby edit <question> - <new reply>
- *   bby msg <question>
- *   bby list
- *   bby list all [limit]
- *
- * The command keeps the original Ullash/Simsimi-trained database as the
- * primary provider, then falls back to Hinata and Noobs when unavailable.
- */
-
 const axios = require("axios");
-const fs = require("fs-extra");
-const path = require("path");
 
-const SETTINGS = Object.freeze({
-  requestTimeout: 15000,
-  cooldownMs: 1200,
-  maxReplyLength: 1900,
-  maxTeacherRows: 100,
-  defaultStyle: 3,
-  aliases: [
-    "bby",
-    "baby",
-    "babu",
-    "bbu",
-    "babe",
-    "bbe",
-    "jan",
-    "janu",
-    "wifey",
-    "bot",
-    "hina",
-    "hinata",
-    "জান",
-    "জানু",
-    "বেবি"
-  ]
-});
+const apiList = "https://gitlab.com/shahadat-sahu/sahu-api/-/raw/main/API.json";
+const getMainAPI = async () => (await axios.get(apiList)).data.simsimi;
 
-const FALLBACK_MESSAGES = [
-  "বলো জানু, শুনছি তো? 💗",
-  "হুম, আমি এখানে আছি। কী বলবে?",
-  "Bolo baby, কী করতে পারি?",
-  "এত সুন্দর করে ডাকলে উত্তর না দিয়ে পারি নাকি? 😊",
-  "বলো, সবার সামনে বলবে নাকি inbox-এ? 😄",
-  "আমি শুনছি—তুমি বলো।"
+const arafat = [
+  "baby",
+  "bby",
+  "babu",
+  "bbu",
+  "jan",
+  "bot",
+  "জান",
+  "জানু",
+  "বেবি",
+  "wifey",
+  "hinata",
 ];
 
-const MEDIA_MESSAGES = {
-  photo: [
-    "ছবিটা সুন্দর হয়েছে—এটার গল্পটা বলো তো? 📸",
-    "ওহ, ছবি পাঠিয়েছ! এটা দেখে কী বলতে হবে? 😊"
-  ],
-  video: [
-    "ভিডিওটা দেখলাম—এর best part কোনটা?",
-    "ভিডিও পাঠিয়ে চুপ কেন? কিছু বলো তো! 🎬"
-  ],
-  audio: [
-    "ভয়েস মেসেজ পেলাম—আরেকবার বলবে? 🎧",
-    "তোমার voice note শুনলাম, এখন গল্পটা বলো।"
-  ],
-  sticker: [
-    "স্টিকার দিয়ে সব কথা বলা যায় নাকি? 😄",
-    "এই স্টিকারটার মানে কী, জানু?"
-  ],
-  animated_image: [
-    "GIF দিয়ে mood বোঝালে, এবার কথায় বলো। 😄",
-    "এই animation-টা মজার! কী হয়েছে?"
-  ],
-  default: [
-    "Attachment পেলাম—এটার ব্যাপারে কী বলব?",
-    "এটা দেখলাম। একটু explain করো তো?"
-  ]
-};
-
-const baseCache = {
-  legacy: null,
-  hinata: null
-};
-
-const lastRequestAt = new Map();
-const handledEvents = new Map();
-
-function claimEvent(event) {
-  const id = event?.messageID || event?.messageId;
-  if (!id) return true;
-  const key = String(id);
-  if (handledEvents.has(key)) return false;
-  handledEvents.set(key, true);
-  setTimeout(() => handledEvents.delete(key), 60000);
-  return true;
-}
-
-const MEMORY_FILE = path.join(__dirname, "cache", "bby_conversation_memory.json");
-const MAX_MEMORY_WORDS = 30000;
-const MAX_MEMORY_ENTRIES = 5000;
-const conversationMemory = new Map();
-let memorySaveTimer = null;
-
-// Local teaching storage keeps the command useful even when third-party APIs change.
-const LOCAL_TEACH_FILE = path.join(__dirname, "cache", "bby_teach.json");
-const localTeachers = new Map();
-let teacherSaveTimer = null;
-
-function wordCount(value) {
-  return clean(value).split(/\s+/).filter(Boolean).length;
-}
-
-function loadConversationMemory() {
-  try {
-    if (!fs.existsSync(MEMORY_FILE)) return;
-    const data = fs.readJsonSync(MEMORY_FILE);
-    if (!data || typeof data !== "object") return;
-    for (const [threadID, entries] of Object.entries(data)) {
-      if (Array.isArray(entries)) conversationMemory.set(threadID, entries.slice(-MAX_MEMORY_ENTRIES));
-    }
-  } catch (error) {
-    console.error("[bby:memory-load]", error.message);
-  }
-}
-
-function persistConversationMemory() {
-  try {
-    fs.ensureDirSync(path.dirname(MEMORY_FILE));
-    const data = Object.fromEntries(conversationMemory);
-    fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 });
-  } catch (error) {
-    console.error("[bby:memory-save]", error.message);
-  }
-}
-
-function scheduleMemorySave() {
-  if (memorySaveTimer) clearTimeout(memorySaveTimer);
-  memorySaveTimer = setTimeout(() => {
-    memorySaveTimer = null;
-    persistConversationMemory();
-  }, 1000);
-}
-
-function trimThreadMemory(threadID) {
-  const key = String(threadID);
-  const entries = conversationMemory.get(key) || [];
-  let totalWords = entries.reduce((sum, item) => sum + wordCount(item.input) + wordCount(item.response), 0);
-  while (entries.length > MAX_MEMORY_ENTRIES || totalWords > MAX_MEMORY_WORDS) {
-    const removed = entries.shift();
-    totalWords -= wordCount(removed?.input) + wordCount(removed?.response);
-  }
-  conversationMemory.set(key, entries);
-}
-
-function rememberConversation(threadID, userID, input, response) {
-  if (!threadID || !clean(input)) return;
-  const key = String(threadID);
-  const entries = conversationMemory.get(key) || [];
-  entries.push({
-    userID: String(userID || ""),
-    input: clean(input).slice(0, 5000),
-    response: clean(response).slice(0, 5000),
-    time: new Date().toISOString()
-  });
-  conversationMemory.set(key, entries);
-  trimThreadMemory(key);
-  scheduleMemorySave();
-}
-
-function getMemoryContext(threadID, maxWords = 2000) {
-  const entries = conversationMemory.get(String(threadID)) || [];
-  const selected = [];
-  let totalWords = 0;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const item = entries[index];
-    const line = "User: " + item.input + "\\nBaby: " + item.response;
-    const count = wordCount(line);
-    if (selected.length && totalWords + count > maxWords) break;
-    selected.unshift(line);
-    totalWords += count;
-  }
-  return selected.join("\\n");
-}
-
-function normalizeTrigger(value) {
-  return lower(value).replace(/\s+/g, " ").replace(/^[,،]+|[,،]+$/g, "");
-}
-
-function normalizeResponses(value) {
-  const values = Array.isArray(value) ? value : [value];
-  return values
-    .flatMap((item) => String(item == null ? "" : item).split(/\s*,\s*/))
-    .map(clean)
-    .filter(Boolean)
-    .map((item) => item.slice(0, SETTINGS.maxReplyLength))
-    .filter(Boolean)
-    .slice(0, 20);
-}
-
-function loadLocalTeaching() {
-  try {
-    if (!fs.existsSync(LOCAL_TEACH_FILE)) return;
-    const data = fs.readJsonSync(LOCAL_TEACH_FILE);
-    if (!data || typeof data !== "object") return;
-    for (const [trigger, value] of Object.entries(data)) {
-      const key = normalizeTrigger(trigger);
-      if (!key) continue;
-      const row = {
-        replies: normalizeResponses(value?.replies || value?.responses),
-        reactions: normalizeResponses(value?.reactions),
-        updatedAt: value?.updatedAt || null
-      };
-      if (row.replies.length || row.reactions.length) localTeachers.set(key, row);
-    }
-  } catch (error) {
-    console.error("[bby:teacher-load]", error.message);
-  }
-}
-
-function persistLocalTeaching() {
-  try {
-    fs.ensureDirSync(path.dirname(LOCAL_TEACH_FILE));
-    fs.writeJsonSync(LOCAL_TEACH_FILE, Object.fromEntries(localTeachers), { spaces: 2 });
-  } catch (error) {
-    console.error("[bby:teacher-save]", error.message);
-  }
-}
-
-function scheduleTeacherSave() {
-  if (teacherSaveTimer) clearTimeout(teacherSaveTimer);
-  teacherSaveTimer = setTimeout(() => {
-    teacherSaveTimer = null;
-    persistLocalTeaching();
-  }, 500);
-}
-
-function saveLocalTeaching(trigger, responses, kind = "replies") {
-  const key = normalizeTrigger(trigger);
-  const values = normalizeResponses(responses);
-  if (!key || !values.length) return { saved: false, count: 0 };
-
-  const row = localTeachers.get(key) || { replies: [], reactions: [], updatedAt: null };
-  const bucket = kind === "reactions" ? row.reactions : row.replies;
-  for (const value of values) {
-    if (!bucket.some((item) => lower(item) === lower(value))) bucket.push(value);
-  }
-  row.updatedAt = new Date().toISOString();
-  localTeachers.set(key, row);
-  scheduleTeacherSave();
-  return { saved: true, added: values.length, count: row.replies.length + row.reactions.length };
-}
-
-function getLocalReply(trigger) {
-  const row = localTeachers.get(normalizeTrigger(trigger));
-  if (!row || !row.replies.length) return "";
-  return pick(row.replies);
-}
-
-function getLocalReaction(trigger) {
-  const row = localTeachers.get(normalizeTrigger(trigger));
-  if (!row || !row.reactions.length) return "";
-  return pick(row.reactions);
-}
-
-function removeLocalTeaching(trigger, index = null) {
-  const key = normalizeTrigger(trigger);
-  const row = localTeachers.get(key);
-  if (!row) return { changed: false };
-  if (index === null || index === undefined) {
-    localTeachers.delete(key);
-    scheduleTeacherSave();
-    return { changed: true, all: true };
-  }
-
-  const bucket = row.replies.length ? row.replies : row.reactions;
-  const number = Number(index);
-  const position = number > 0 ? number - 1 : 0;
-  if (!Number.isInteger(position) || position < 0 || position >= bucket.length) return { changed: false };
-  bucket.splice(position, 1);
-  if (!row.replies.length && !row.reactions.length) localTeachers.delete(key);
-  else localTeachers.set(key, row);
-  scheduleTeacherSave();
-  return { changed: true, all: false };
-}
-
-function editLocalTeaching(trigger, replacement) {
-  const key = normalizeTrigger(trigger);
-  const row = localTeachers.get(key);
-  const values = normalizeResponses(replacement);
-  if (!row || !values.length) return { changed: false };
-  row.replies = values;
-  row.updatedAt = new Date().toISOString();
-  localTeachers.set(key, row);
-  scheduleTeacherSave();
-  return { changed: true };
-}
-
-function getLocalTeacherList() {
-  return [...localTeachers.entries()]
-    .map(([id, row]) => ({ id, count: (row.replies?.length || 0) + (row.reactions?.length || 0) }))
-    .filter((row) => row.count > 0)
-    .sort((a, b) => b.count - a.count);
-}
-
-loadConversationMemory();
-loadLocalTeaching();
-
-
 module.exports.config = {
-  name: "bby",
-  aliases: SETTINGS.aliases,
-  version: "8.1.0",
-  author: "Advanced merge",
-  countDown: 2,
-  role: 0,
-  description: "Advanced Baby AI chat, teaching, replies, reactions and media support",
-  category: "chat",
-  usePrefix: false,
-  guide: {
-    en: [
-      "{pn} <message>",
-      "{pn} teach <question> - <reply1>, <reply2>",
-      "{pn} teach react <question> - <reaction1>, <reaction2>",
-      "{pn} teach amar <question> - <reply>",
-      "{pn} remove <question>",
-      "{pn} rm <question> - <index>",
-      "{pn} edit <question> - <new reply>",
-      "{pn} msg <question>",
-      "{pn} list",
-      "{pn} list all [limit]"
-    ].join("\n")
-  }
+ name: "baby",
+ aliases: ["bby", "jan", "janu", "wifey", "bot", "hinata", "জান", "জানু", "babu", "বেবি", "bbu"],
+ version: "1.0.3",
+ author: "ULLASH edit by Arafat",
+ role: 0,
+ countDown: 0,
+ description: "Cute AI Baby Chatbot | Talk, Teach & Chat with Emotion ☢️",
+ category: "chat",
+ guide: { en: "{pn} [message]" }
 };
 
-function clean(value) {
-  return String(value == null ? "" : value).trim();
-}
-
-function lower(value) {
-  return clean(value).toLocaleLowerCase();
-}
-
-function pick(list) {
-  return list[Math.floor(Math.random() * list.length)];
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function stripTrailingSlash(value) {
-  return clean(value).replace(/\/+$/, "");
-}
-
-function asError(error) {
-  return error?.response?.data?.error ||
-    error?.response?.data?.message ||
-    error?.message ||
-    "Unknown API error";
-}
-
-function isHtmlDocument(value) {
-  const text = clean(value);
-  return /^<!doctype html[\s>]/i.test(text) || /^<html[\s>]/i.test(text);
-}
-
-function extractText(data) {
-  if (typeof data === "string") {
-    const text = clean(data);
-    return isHtmlDocument(text) || isBadRemoteReply(text) ? "" : text;
-  }
-  if (!data || typeof data !== "object") return "";
-
-  const candidates = [
-    data.message,
-    data.reply,
-    data.response,
-    data.answer,
-    data.result,
-    data.content,
-    data.text,
-    data.data,
-    data.data?.answer,
-    data.data?.result,
-    data.data?.content,
-    data.data?.message,
-    data.data?.reply,
-    data.data?.response,
-    data.data?.text,
-    data.output,
-    data.data?.output,
-    data.body,
-    data.choices?.[0]?.message?.content,
-    data.data?.choices?.[0]?.message?.content
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      const text = candidate.map(clean).filter(Boolean).join("\n");
-      if (text && !isBadRemoteReply(text)) return text;
-    } else if (clean(candidate)) {
-      const text = clean(candidate);
-      if (!isHtmlDocument(text) && !isBadRemoteReply(text)) return text;
-    }
-  }
-
-  return "";
-}
-
-function isBadRemoteReply(value) {
-  const text = clean(value);
-  return /install\s+updated\s+bby\.js|raw\.githubusercontent\.com\/.*bby\.js/i.test(text);
-}
-
-function splitReply(text) {
-  const value = clean(text);
-  if (!value) return ["দুঃখিত, কোনো উত্তর পাওয়া যায়নি।"];
-  if (value.length <= SETTINGS.maxReplyLength) return [value];
-
-  const suffix = "\n\n… (উত্তরটি সংক্ষিপ্ত করা হয়েছে)";
-  let cut = value.lastIndexOf("\n", SETTINGS.maxReplyLength - suffix.length);
-  if (cut < SETTINGS.maxReplyLength * 0.55) {
-    cut = value.lastIndexOf(" ", SETTINGS.maxReplyLength - suffix.length);
-  }
-  if (cut < SETTINGS.maxReplyLength * 0.55) cut = SETTINGS.maxReplyLength - suffix.length;
-  return [value.slice(0, Math.max(1, cut)).trimEnd() + suffix];
-}
-
-function markReply(info, event, extra = {}) {
-  const store = global.GoatBot?.onReply;
-  const messageID = info?.messageID || info?.messageId || info?.id || info?.message_id;
-  if (!store || typeof store.set !== "function" || !messageID) return;
-
-  const replyData = {
-    commandName: module.exports.config.name,
-    type: "reply",
-    messageID,
-    author: event.senderID,
-    threadID: event.threadID,
-    ...extra
-  };
-
-  // Keep the native key and a string key so adapters that change the ID type
-  // between send and receive still find the reply handler.
-  store.set(messageID, replyData);
-  store.set(String(messageID), replyData);
-}
-
-function sendOne(api, text, event, callback) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (error, info) => {
-      if (settled) return;
-      settled = true;
-      if (typeof callback === "function") callback(error, info);
-      resolve({ error, info });
-    };
+module.exports.onStart = async ({
+    api,
+    event,
+    args,
+    usersData
+}) => {
+    const link = `${await getMainAPI()}`;
+    const dipto = args.join(" ").toLowerCase();
+    const uid = event.senderID;
+    let command, comd, final;
 
     try {
-      const result = api.sendMessage(
-        text,
-        event.threadID,
-        (error, info) => finish(error, info),
-        event.messageID
-      );
+        if (!args[0]) {
+            const ran = ["Bolo baby", "hum", "type help baby", "type !baby hi"];
+            return api.sendMessage(ran[Math.floor(Math.random() * ran.length)], event.threadID, event.messageID);
+        }
 
-      // A few GoatBot forks return a Promise instead of invoking a callback.
-      if (result && typeof result.then === "function") {
-        result.then((info) => finish(null, info)).catch((error) => finish(error));
-      }
-    } catch (error) {
-      finish(error);
+        if (args[0] === 'remove') {
+            const fina = dipto.replace("remove ", "");
+            const dat = (await axios.get(`${link}?remove=${fina}&senderID=${uid}`)).data.message;
+            return api.sendMessage(dat, event.threadID, event.messageID);
+        }
+
+        if (args[0] === 'rm' && dipto.includes('-')) {
+            const [fi, f] = dipto.replace("rm ", "").split(/\s*-\s*/);
+            const da = (await axios.get(`${link}?remove=${fi}&index=${f}`)).data.message;
+            return api.sendMessage(da, event.threadID, event.messageID);
+        }
+
+        if (args[0] === 'list') {
+            if (args[1] === 'all') {
+                const data = (await axios.get(`${link}?list=all`)).data;
+                const limit = parseInt(args[2]) || 100;
+                const limited = data?.teacher?.teacherList?.slice(0, limit);
+                const teachers = await Promise.all(limited.map(async (item) => {
+                    const number = Object.keys(item)[0];
+                    const value = item[number];
+                    const name = await usersData.getName(number).catch(() => number) || "Not found";
+                    return { name, value };
+                }));
+                teachers.sort((a, b) => b.value - a.value);
+                const output = teachers.map((t, i) => `${i + 1}/ ${t.name}: ${t.value}`).join('\n');
+                return api.sendMessage(`Total Teach = ${data.length}\n👑 | List of Teachers of baby\n${output}`, event.threadID, event.messageID);
+            } else {
+                const d = (await axios.get(`${link}?list=all`)).data;
+                return api.sendMessage(`🐤 | Total Teach = ${d.length || "api off"}\n♻️ | Total Response = ${d.responseLength || "api off"}`, event.threadID, event.messageID);
+            }
+        }
+
+        if (args[0] === 'msg') {
+            const fuk = dipto.replace("msg ", "");
+            const d = (await axios.get(`${link}?list=${fuk}`)).data.data;
+            return api.sendMessage(`Message ${fuk} = ${d}`, event.threadID, event.messageID);
+        }
+
+        if (args[0] === 'edit') {
+            const command = dipto.split(/\s*-\s*/)[1];
+            if (command.length < 2) return api.sendMessage('❌ | Invalid format! Use edit [YourMessage] - [NewReply]', event.threadID, event.messageID);
+            const dA = (await axios.get(`${link}?edit=${args[1]}&replace=${command}&senderID=${uid}`)).data.message;
+            return api.sendMessage(`changed ${dA}`, event.threadID, event.messageID);
+        }
+
+        if (args[0] === 'teach' && args[1] !== 'amar' && args[1] !== 'react') {
+            [comd, command] = dipto.split(/\s*-\s*/);
+            final = comd.replace("teach ", "");
+            if (command.length < 2) return api.sendMessage('❌ | Invalid format!', event.threadID, event.messageID);
+            const re = await axios.get(`${link}?teach=${final}&reply=${command}&senderID=${uid}&threadID=${event.threadID}`);
+            const tex = re.data.message;
+            const teacher = (await usersData.get(re.data.teacher)).name;
+            return api.sendMessage(`✅ Replies added ${tex}\nTeacher: ${teacher}\nTeachs: ${re.data.teachs}`, event.threadID, event.messageID);
+        }
+
+        if (args[0] === 'teach' && args[1] === 'amar') {
+            [comd, command] = dipto.split(/\s*-\s*/);
+            final = comd.replace("teach ", "");
+            if (command.length < 2) return api.sendMessage('❌ | Invalid format!', event.threadID, event.messageID);
+            const tex = (await axios.get(`${link}?teach=${final}&senderID=${uid}&reply=${command}&key=intro`)).data.message;
+            return api.sendMessage(`✅ Replies added ${tex}`, event.threadID, event.messageID);
+        }
+
+        if (args[0] === 'teach' && args[1] === 'react') {
+            [comd, command] = dipto.split(/\s*-\s*/);
+            final = comd.replace("teach react ", "");
+            if (command.length < 2) return api.sendMessage('❌ | Invalid format!', event.threadID, event.messageID);
+            const tex = (await axios.get(`${link}?teach=${final}&react=${command}`)).data.message;
+            return api.sendMessage(`✅ Replies added ${tex}`, event.threadID, event.messageID);
+        }
+
+        if (dipto.includes('amar name ki') || dipto.includes('amr nam ki') || dipto.includes('amar nam ki') || dipto.includes('amr name ki') || dipto.includes('whats my name')) {
+            const data = (await axios.get(`${link}?text=amar name ki&senderID=${uid}&key=intro`)).data.reply;
+            return api.sendMessage(data, event.threadID, event.messageID);
+        }
+
+        const d = (await axios.get(`${link}?text=${dipto}&senderID=${uid}&font=1`)).data.reply;
+        if (!d) return api.sendMessage("• please teach me Baby 🐥", event.threadID, event.messageID);
+        api.sendMessage(d, event.threadID, (error, info) => {
+            if (!error && info) {
+                global.GoatBot.onReply.set(info.messageID, {
+                    commandName: module.exports.config.name,
+                    type: "reply",
+                    messageID: info.messageID,
+                    author: event.senderID,
+                    d,
+                    apiUrl: link
+                });
+            }
+        }, event.messageID);
+
+    } catch (e) {
+        console.log(e);
+        api.sendMessage("Check console for error", event.threadID, event.messageID);
     }
-  });
-}
+};
 
-async function sendReply(api, event, text, extra = {}) {
-  let lastInfo = null;
-  for (const chunk of splitReply(text)) {
-    const result = await sendOne(api, chunk, event, (error, info) => {
-      if (!error && info) {
-        lastInfo = info;
-        markReply(info, event, extra);
-      }
+module.exports.onReply = async function ({ api, event, usersData: Users }) {
+ try {
+ const body = event.body ? event.body.toLowerCase() : "";
+ const triggered = arafat.some(word => body.startsWith(word));
+ if (triggered) {
+  api.setMessageReaction("🪽", event.messageID, () => {}, true);
+  api.sendTypingIndicator(event.threadID, true);
+ }
+
+ const attachments = event.attachments || [];
+ const hasMedia = attachments.length > 0;
+
+ if (hasMedia) {
+  const type = attachments[0]?.type || "";
+  const mediaReplies = {
+   photo: [
+    "𝗔𝗷𝗸𝗲 𝗺𝗯 𝗻𝗮𝗶𝗶 𝗯𝗼𝗹𝗲 𝗽𝗵𝗼𝘁𝗼 𝘁𝗮 𝘃𝗮𝗹𝗼 𝗸𝗼𝗿𝗲 𝗱𝗲𝗸𝗵𝘁𝗲 𝗽𝗮𝗿𝗹𝗮𝗺 𝗻𝗮𝗵 ☹️",
+    "𝗘𝗶 𝗽𝗵𝗼𝘁𝗼 𝘁𝗮 𝗱𝗲𝗸𝗵𝗲 𝗺𝗼𝗻 𝘁𝗮 𝗲𝗸𝘁𝘂 𝘃𝗮𝗹𝗼 𝗵𝗼𝘆𝗲 𝗴𝗲𝗹𝗼 🥺",
+    "𝗛𝗼𝘁𝗮𝘁 𝗽𝗵𝗼𝘁𝗼 𝗱𝗶𝗹𝗲 𝗷𝗲, 𝗲𝘁𝗮 𝗸𝗶 𝗺𝗼𝗱𝗲𝗹𝗶𝗻𝗴 𝗲𝗿 𝗷𝗼𝗻𝗻𝗼? 😂",
+    "𝗘𝗸𝘁𝗮 𝗸𝗼𝘁𝗵𝗮 𝗯𝗼𝗹𝗯𝗼? 𝗘𝗶 𝗽𝗵𝗼𝘁𝗼 𝘁𝗮 𝘀𝗮𝘃𝗲 𝗸𝗼𝗿𝗲 𝗿𝗮𝗸𝗵𝗯𝗼 😌",
+    "𝗘𝘁𝗼 𝘀𝘂𝗻𝗱𝗼𝗿 𝗽𝗵𝗼𝘁𝗼 𝗽𝗮𝘁𝗵𝗮𝗼 𝗸𝗲𝗻𝗼, 𝗹𝗼𝗷𝗷𝗮 𝗹𝗮𝗴𝗲 𝘁𝗼 🤭",
+    "𝗘𝗶 𝗽𝗵𝗼𝘁𝗼 𝗿 𝗷𝗼𝗻𝗻𝗼 𝗺𝗯 𝗸𝗵𝗼𝗿𝗼𝗰𝗵 𝗸𝗼𝗿𝗮 𝘄𝗼𝗿𝘁𝗵 𝗶𝘁 𝗰𝗵𝗶𝗹𝗼 😂",
+    "𝗧𝘂𝗺𝗶 𝗸𝗶 𝗽𝗵𝗼𝘁𝗼𝗴𝗿𝗮𝗽𝗵𝗲𝗿 𝗻𝗮𝗸𝗶 𝗻𝗮𝘁𝘂𝗿𝗮𝗹𝗹𝘆 𝗲𝗶 𝘁𝗮𝗹𝗲𝗻𝘁? 🫢"
+   ],
+   audio: [
+    "𝗔𝗷𝗸𝗲 𝗺𝗯 𝗻𝗮𝗶𝗶 𝗯𝗼𝗹𝗲 𝘃𝗼𝗶𝗰𝗲 𝘁𝗮 𝘀𝗵𝘂𝗻𝘁𝗲 𝗽𝗮𝗿𝗹𝗮𝗺 𝗻𝗮𝗵 ☹️",
+    "𝗘𝗶 𝗴𝗮𝗮𝗻 𝘁𝗮 𝗽𝗮𝘁𝗵𝗮𝗶𝘀𝗼, 𝗲𝗸𝗵𝗼𝗻 𝗺𝗮𝘁𝗵𝗮 𝘁𝗵𝗲𝗸𝗲 𝗷𝗮𝗯𝗲 𝗻𝗮𝗵 🤦‍♀️",
+    "𝗚𝗮𝗮𝗻 𝘀𝗵𝘂𝗻𝗲 𝗻𝗮𝗰𝗵𝘁𝗲 𝗶𝗰𝗵𝗵𝗲 𝗸𝗼𝗿𝗰𝗵𝗲, 𝗸𝗲𝘂 𝗱𝗲𝗸𝗵𝗹𝗲 𝗹𝗼𝗷𝗷𝗮 𝗽𝗮𝗯𝗼 💃😂",
+    "𝗘𝗶 𝗮𝘂𝗱𝗶𝗼 𝘁𝗮 𝘀𝗵𝘂𝗻𝗲 𝗺𝗼𝗻 𝘁𝗮 𝗳𝗿𝗲𝘀𝗵 𝗵𝗼𝘆𝗲 𝗴𝗲𝗹𝗼 𝗲𝗸𝗱𝗼𝗺 🥺",
+    "𝗥𝗲𝗽𝗲𝗮𝘁 𝗲 𝗱𝗶𝘆𝗲 𝗿𝗮𝗸𝗵𝘀𝗶, 𝘁𝗵𝗮𝗺𝗮𝘁𝗲 𝗽𝗮𝗿𝗰𝗵𝗶 𝗻𝗮𝗵 🔁😌",
+    "𝗧𝘂𝗺𝗶 𝗽𝗮𝘁𝗵𝗮𝗶𝘀𝗼 𝗯𝗼𝗹𝗲 𝘀𝗵𝘂𝗻𝗹𝗮𝗺, 𝗻𝗮𝗵𝗼𝗹𝗲 𝘀𝗵𝘂𝗻𝘁𝗮𝗺 𝗻𝗮𝗵 😏",
+    "𝗘𝗶 𝗴𝗮𝗮𝗻 𝗿 𝘁𝗮𝘀𝘁𝗲 𝗱𝗲𝗸𝗵𝗲 𝗯𝘂𝗷𝗵𝗮 𝗷𝗮𝘆 𝘁𝘂𝗺𝗶 𝗲𝗸𝗷𝗼𝗻 𝘀𝗽𝗲𝗰𝗶𝗮𝗹 𝗺𝗮𝗻𝘂𝘀𝗵 😍",
+    "𝗚𝗮𝗮𝗻 𝘀𝗵𝘂𝗻𝗲 𝗲𝗸𝗹𝗮 𝗲𝗸𝗹𝗮 𝗻𝗮𝗰𝗵𝘀𝗶, 𝗸𝗲𝘂 𝗱𝗲𝗸𝗵𝘀𝗼 𝗻𝗮𝗵 𝘁𝗼𝗵?💃🤭"
+   ],
+   video: [
+    "𝗔𝗷𝗸𝗲 𝗺𝗯 𝗻𝗮𝗶𝗶 𝗯𝗼𝗹𝗲 𝘃𝗶𝗱𝗲𝗼 𝘁𝗮 𝗱𝗲𝗸𝗵𝘁𝗲 𝗽𝗮𝗿𝗹𝗮𝗺 𝗻𝗮𝗵 ☹️",
+    "𝗩𝗶𝗱𝗲𝗼 𝘁𝗮 𝗱𝗲𝗸𝗵𝗲 𝗵𝗮𝘀𝗶 𝘁𝗵𝗮𝗺𝗮𝘁𝗲 𝗽𝗮𝗿𝗰𝗵𝗶 𝗻𝗮𝗵 𝗵𝗲𝗹𝗽 😂",
+    "𝗘𝗶 𝘃𝗶𝗱𝗲𝗼 𝗿 𝗷𝗼𝗻𝗻𝗼 𝗱𝗮𝘁𝗮 𝗸𝗵𝗼𝗿𝗼𝗰𝗵 𝗸𝗼𝗿𝗮 𝗲𝗸𝗱𝗼𝗺 𝘀𝗮𝗿𝘁𝗵𝗼𝗸 🥹",
+    "𝗘𝘁𝗼 𝘃𝗶𝗱𝗲𝗼 𝗽𝗮𝘁𝗵𝗮𝗼 𝗸𝗲𝗻𝗼, 𝗸𝗮𝗮𝗷 𝗸𝗼𝗿𝘁𝗲 𝗽𝗮𝗿𝗰𝗵𝗶 𝗻𝗮𝗵 😒",
+    "𝗩𝗶𝗱𝗲𝗼 𝘁𝗮 𝘀𝗵𝗲𝘀𝗵 𝗵𝗼𝘄𝗮𝗿 𝗽𝗼𝗿𝗲 𝗼 𝗵𝗮𝘀𝗶 𝘁𝗵𝗮𝗺𝘀𝗲 𝗻𝗮𝗵 🤣"
+   ],
+   sticker: [
+    "𝗦𝘁𝗶𝗰𝗸𝗲𝗿 𝗽𝗮𝘁𝗵𝗮𝗶𝘀𝗲, 𝘁𝘆𝗽𝗲 𝗸𝗼𝗿𝘁𝗲 𝘃𝗼𝘆 𝗹𝗮𝗴𝗲 𝗻𝗮𝗸𝗶? 🤭",
+    "𝗖𝘂𝘁𝗲 𝘀𝘁𝗶𝗰𝗸𝗲𝗿 𝗯𝘂𝘁 𝘁𝘂𝗺𝗶 𝗲𝗿 𝘁𝗵𝗲𝗸𝗲 𝗯𝗲𝘀𝗵𝗶 𝗰𝘂𝘁𝗲 🥺",
+    "𝗦𝘁𝗶𝗰𝗸𝗲𝗿 𝗱𝗶𝘆𝗲 𝗸𝗼𝘁𝗵𝗮 𝗯𝗼𝗹𝗮 𝘀𝗵𝗶𝗸𝗵𝗲 𝗴𝗲𝘀𝗼, 𝗹𝗲𝗴𝗲𝗻𝗱 😁",
+    "𝗘𝗶 𝘀𝘁𝗶𝗰𝗸𝗲𝗿 𝘁𝗮 𝗮𝗺𝗮𝗿 𝗽𝗲𝗿𝘀𝗼𝗻𝗮𝗹𝗶𝘁𝘆 𝗱𝗲𝘀𝗰𝗿𝗶𝗯𝗲 𝗸𝗼𝗿𝗲 𝗽𝗲𝗿𝗳𝗲𝗰𝘁𝗹𝘆 😌",
+    "𝗠𝗼𝗻 𝘁𝗮 𝘃𝗮𝗹𝗼 𝗸𝗼𝗿𝗲 𝗱𝗶𝗹𝗲 𝗲𝗶 𝘀𝘁𝗶𝗰𝗸𝗲𝗿 𝗱𝗶𝘆𝗲 😊",
+    "𝗜𝗰𝗼𝗻𝗶𝗰 𝘀𝘁𝗶𝗰𝗸𝗲𝗿, 𝘁𝗼𝗺𝗮𝗿 𝗰𝗵𝗼𝗶𝗰𝗲 𝗲𝗸𝗱𝗼𝗺 𝗳𝗶𝗿𝘀𝘁 𝗰𝗹𝗮𝘀𝘀 😍"
+   ],
+   animated_image: [
+    "𝗔𝗷𝗸𝗲 𝗺𝗯 𝗻𝗮𝗶𝗶 𝗯𝗼𝗹𝗲 𝗴𝗶𝗳 𝘁𝗮 𝘃𝗮𝗹𝗼 𝗸𝗼𝗿𝗲 𝗱𝗲𝗸𝗵𝘁𝗲 𝗽𝗮𝗿𝗹𝗮𝗺 𝗻𝗮𝗵 😭",
+    "𝗘𝗶 𝗚𝗜𝗙 𝘁𝗮 𝗽𝗮𝘁𝗵𝗮𝗶𝘀𝗲 𝗮𝗿 𝗰𝗵𝗼𝗹𝗲 𝗴𝗲𝘀𝗲 𝗹𝗲𝗴𝗲𝗻𝗱 𝗲𝗿 𝗺𝗼𝘁𝗼 😂💀",
+    "𝗚𝗜𝗙 𝗱𝗲𝗸𝗵𝗲 𝗽𝗲𝘁 𝗯𝗲𝘁𝗵𝗮 𝗵𝗼𝘆𝗲 𝗴𝗲𝘀𝗲 𝗵𝗮𝘀𝘁𝗲 𝗵𝗮𝘀𝘁𝗲 😂",
+    "𝗕𝗼𝗿𝗼 𝗳𝘂𝗻𝗻𝘆 𝗺𝗮𝗻𝘂𝘀𝗵 𝘁𝘂𝗺𝗶, 𝗲𝗶 𝗚𝗜𝗙 𝗲 𝗽𝗿𝗼𝘃𝗲 𝗵𝗼𝘆𝗲 𝗴𝗲𝗹𝗼 😂",
+    "𝗚𝗜𝗙 𝘁𝗮 𝘀𝗮𝘃𝗲 𝗸𝗼𝗿𝗲 𝗿𝗮𝗸𝗵𝘀𝗶, 𝗽𝗼𝗿𝗲 𝗸𝗮𝗷𝗲 𝗹𝗮𝗴𝗯𝗲 😌",
+    "𝗘𝗶 𝗚𝗜𝗙 𝗿 𝗷𝗼𝗻𝗻𝗼 𝗺𝗯 𝗴𝗲𝘀𝗲 𝗯𝘂𝘁 𝘄𝗼𝗿𝘁𝗵 𝗶𝘁 𝗰𝗵𝗶𝗹𝗼 🥹🔥",
+    "𝗚𝗜𝗙 𝗽𝗮𝘁𝗵𝗮𝗹𝗲 𝗮𝗺𝗶 𝗵𝗮𝘀𝗯𝗼, 𝘁𝘂𝗺𝗶 𝗷𝗮𝗻𝘁𝗮 𝘁𝗮𝗶 𝗽𝗮𝘁𝗵𝗮𝗶𝘀𝗼 𝘁𝗮𝗶𝗶 𝗻𝗮𝗵? 😏"
+   ]
+  };
+
+  const category = mediaReplies[type] || mediaReplies["sticker"];
+  const reply = category[Math.floor(Math.random() * category.length)];
+  return await api.sendMessage(reply, event.threadID, (err, info) => {
+   if (!err) {
+    global.GoatBot.onReply.set(info.messageID, {
+     commandName: module.exports.config.name,
+     messageID: info.messageID,
+     author: event.senderID,
+     type: "simsimi"
     });
-    if (result.error) throw result.error;
-  }
-  return lastInfo;
-}
-
-function react(api, event, emoji = "💗") {
-  try {
-    if (typeof api.setMessageReaction === "function") {
-      api.setMessageReaction(emoji, event.messageID, () => {}, true);
-    }
-  } catch (_) {
-    // Reactions are optional on some GoatBot adapters.
-  }
-}
-
-function typing(api, event, enabled = true) {
-  try {
-    if (typeof api.sendTypingIndicator === "function") {
-      api.sendTypingIndicator(event.threadID, enabled);
-    }
-  } catch (_) {
-    // Typing indicators are optional.
-  }
-}
-
-function checkCooldown(event, scope = "chat") {
-  const key = `${scope}:${event.threadID}:${event.senderID}`;
-  const now = Date.now();
-  const previous = lastRequestAt.get(key) || 0;
-  if (now - previous < SETTINGS.cooldownMs) return false;
-  lastRequestAt.set(key, now);
-  return true;
-}
-
-async function getLegacyBase() {
-  if (baseCache.legacy) return baseCache.legacy;
-
-  try {
-    const response = await axios.get(
-      "https://gitlab.com/shahadat-sahu/sahu-api/-/raw/main/API.json",
-      { timeout: SETTINGS.requestTimeout }
-    );
-    const base = stripTrailingSlash(response.data?.simsimi);
-    if (base) {
-      baseCache.legacy = base;
-      return base;
-    }
-  } catch (_) {
-    // Use the known public fallback below.
-  }
-
-  return "https://noobs-api.top/dipto";
-}
-
-async function getHinataBase() {
-  if (baseCache.hinata) return baseCache.hinata;
-
-  try {
-    const response = await axios.get(
-      "https://raw.githubusercontent.com/mahmudx7/HINATA/main/baseApiUrl.json",
-      { timeout: SETTINGS.requestTimeout }
-    );
-    const base = stripTrailingSlash(response.data?.mahmud);
-    if (base) {
-      baseCache.hinata = base;
-      return base;
-    }
-  } catch (_) {
-    // Use the known public fallback below.
-  }
-
-  return "https://noobs-api.top/dipto";
-}
-
-async function legacyRequest(params) {
-  const base = await getLegacyBase();
-  return axios.get(base, {
-    params,
-    timeout: SETTINGS.requestTimeout
-  });
-}
-
-async function noobsRequest(params) {
-  return axios.get(`${stripTrailingSlash("https://noobs-api.top/dipto")}/baby`, {
-    params,
-    timeout: SETTINGS.requestTimeout
-  });
-}
-
-async function hinataRequest(method, path, data, params) {
-  const base = await getHinataBase();
-  return axios({
-    method,
-    url: `${base}${path}`,
-    data,
-    params,
-    timeout: SETTINGS.requestTimeout
-  });
-}
-
-async function firstSuccessful(label, requests) {
-  const errors = [];
-  for (const request of requests) {
-    try {
-      const response = await request();
-      if (response?.status >= 400) {
-        throw new Error(`${label}: HTTP ${response.status}`);
-      }
-      return response;
-    } catch (error) {
-      errors.push(asError(error));
-    }
-  }
-  throw new Error(`${label} unavailable: ${errors[errors.length - 1] || "unknown error"}`);
-}
-
-
-
-async function pollinationsRequest(input, context) {
-  const response = await axios.post(
-    "https://text.pollinations.ai/",
-    {
-      messages: [
-        { role: "system", content: "You are Baby AI. Answer briefly and helpfully in the user's language. Recent memory:\\n" + (context || "none") },
-        { role: "user", content: input }
-      ],
-      model: "openai",
-      private: true
-    },
-    { timeout: SETTINGS.requestTimeout, headers: { "Content-Type": "application/json" } }
-  );
-  const message = extractText(response.data);
-  if (!message) throw new Error("Pollinations returned an empty response");
-  return message;
-}
-
-function localFallback(input, threadID) {
-  const recent = getMemoryContext(threadID, 120);
-  const value = lower(input);
-  if (/^(hi|hello|hey|হাই|হ্যালো|সালাম)/i.test(value)) return pick(FALLBACK_MESSAGES);
-  if (/(মনে আছে|আগের কথা|remember|previous|আগে কী বলেছিল)/i.test(value) && recent) {
-    return "API এখন offline, তবে সাম্প্রতিক কথোপকথন মনে আছে:\\n\\n" + recent;
-  }
-  return "আমি এখন offline backup mode-এ আছি। API service ফিরে এলে সম্পূর্ণ AI উত্তর দিতে পারব। আপনার কথাটি মনে রাখা হয়েছে।";
-}
-
-async function getBotResponse(text, attachments = [], senderID = "", threadID = "") {
-  const input = clean(text) || "meow";
-  const files = Array.isArray(attachments) ? attachments : [];
-  const context = getMemoryContext(threadID, 1800);
-  const learnedReply = getLocalReply(input);
-  if (learnedReply) return learnedReply;
-
-  try {
-    return await firstSuccessful("Baby AI", [
-      async () => {
-        const result = await legacyRequest({
-          text: input.toLocaleLowerCase(),
-          senderID,
-          font: 1
-        });
-        const message = extractText(result.data);
-        if (!message) throw new Error("Ullash/Simsimi API returned an empty response");
-        return message;
-      },
-      async () => {
-        const result = await hinataRequest("POST", "/api/hinata", {
-          text: input,
-          style: SETTINGS.defaultStyle,
-          attachments: files,
-          context
-        });
-        const message = extractText(result.data);
-        if (!message) throw new Error("Hinata returned an empty response");
-        return message;
-      },
-      async () => {
-        const result = await noobsRequest({
-          text: input.toLocaleLowerCase(),
-          senderID,
-          font: 1,
-          context
-        });
-        const message = extractText(result.data);
-        if (!message) throw new Error("Fallback API returned an empty response");
-        return message;
-      },
-      async () => pollinationsRequest(input, context)
-    ]);
-  } catch (error) {
-    console.error("[bby:all-api-failed]", error.message);
-    return localFallback(input, threadID);
-  }
-}
-
-function splitTeachInput(value) {
-  const source = clean(value);
-  const match = source.match(/\s+-\s+/);
-  if (match) {
-    const index = match.index;
-    return {
-      left: source.slice(0, index).trim(),
-      right: source.slice(index + match[0].length).trim()
-    };
-  }
-
-  const separator = source.indexOf("-");
-  if (separator > 0) {
-    return {
-      left: source.slice(0, separator).trim(),
-      right: source.slice(separator + 1).trim()
-    };
-  }
-
-  return { left: source, right: "" };
-}
-
-async function teach(trigger, responses, userID, threadID, isIntro = false) {
-  const local = saveLocalTeaching(trigger, responses, "replies");
-  if (local.saved) return { data: { message: "Local teaching saved", count: local.count } };
-
-  const payload = {
-    trigger: lower(trigger),
-    responses: clean(responses),
-    userID
-  };
-
-  const remoteRequests = [
-    async () => legacyRequest({
-      teach: payload.trigger,
-      reply: payload.responses,
-      senderID: userID,
-      threadID,
-      ...(isIntro ? { key: "intro" } : {})
-    }),
-    async () => hinataRequest("POST", "/api/jan/teach", payload)
-  ];
-
-  // Local teaching is the guaranteed offline backup. Sync remotely in the background
-  // when possible, without making the command fail when third-party APIs are down.
-  if (local.saved) {
-    Promise.resolve()
-      .then(() => firstSuccessful("Teaching sync", remoteRequests))
-      .catch((error) => console.error("[bby:teaching-sync]", asError(error)));
-    return { data: { message: "Local teaching saved; remote sync queued", count: local.count } };
-  }
-
-  return firstSuccessful("Teaching", remoteRequests);
-}
-
-async function teachReaction(trigger, reactions, userID, threadID) {
-  const local = saveLocalTeaching(trigger, reactions, "reactions");
-  if (local.saved) return { data: { message: "Local reaction teaching saved", count: local.count } };
-
-  const value = {
-    trigger: lower(trigger),
-    reactions: clean(reactions),
-    userID,
-    threadID
-  };
-
-  const remoteRequests = [
-    async () => legacyRequest({
-      teach: value.trigger,
-      react: value.reactions,
-      senderID: userID,
-      threadID
-    }),
-    async () => hinataRequest("POST", "/api/jan/teach", {
-      trigger: value.trigger,
-      responses: value.reactions,
-      userID
-    })
-  ];
-
-  if (local.saved) {
-    Promise.resolve()
-      .then(() => firstSuccessful("Reaction teaching sync", remoteRequests))
-      .catch((error) => console.error("[bby:reaction-sync]", asError(error)));
-    return { data: { message: "Local reaction teaching saved; remote sync queued", count: local.count } };
-  }
-
-  return firstSuccessful("Reaction teaching", remoteRequests);
-}
-
-async function removeReply(trigger, index, userID) {
-  const local = removeLocalTeaching(trigger, index);
-  if (local.changed) {
-    return { data: { message: local.all ? "✅ সব শেখানো উত্তর সরানো হয়েছে।" : "✅ শেখানো উত্তরটি সরানো হয়েছে।" } };
-  }
-
-  const normalizedTrigger = lower(trigger);
-  if (index !== null && index !== undefined) {
-    return firstSuccessful("Removing reply", [
-      async () => legacyRequest({
-        remove: normalizedTrigger,
-        index: Number(index),
-        senderID: userID
-      }),
-      async () => hinataRequest("DELETE", "/api/jan/remove", {
-        trigger: normalizedTrigger,
-        index: Number(index)
-      })
-    ]);
-  }
-
-  return firstSuccessful("Removing reply", [
-    async () => legacyRequest({
-      remove: normalizedTrigger,
-      senderID: userID
-    }),
-    async () => hinataRequest("DELETE", "/api/jan/remove", {
-      trigger: normalizedTrigger,
-      index: 0
-    })
-  ]);
-}
-
-async function editReply(trigger, replacement, userID) {
-  const local = editLocalTeaching(trigger, replacement);
-  if (local.changed) return { data: { message: "✅ লোকাল শেখানো উত্তর আপডেট হয়েছে।" } };
-
-  const oldTrigger = lower(trigger);
-  const newResponse = clean(replacement);
-
-  return firstSuccessful("Editing reply", [
-    async () => legacyRequest({
-      edit: oldTrigger,
-      replace: newResponse,
-      senderID: userID
-    }),
-    async () => hinataRequest("PUT", "/api/jan/edit", {
-      oldTrigger,
-      newResponse
-    })
-  ]);
-}
-
-async function lookupMessage(trigger) {
-  const local = getLocalReply(trigger);
-  if (local) return { data: { message: local } };
-
-  const value = lower(trigger);
-  return firstSuccessful("Message lookup", [
-    async () => legacyRequest({ list: value }),
-    async () => hinataRequest("GET", "/api/jan/msg", null, {
-      userMessage: `msg ${value}`
-    })
-  ]);
-}
-
-async function getList(all = false) {
-  const local = getLocalTeacherList();
-  if (local.length) {
-    return {
-      data: {
-        data: Object.fromEntries(local.map((row) => [row.id, row.count])),
-        count: local.length
-      }
-    };
-  }
-
-  return firstSuccessful("Teacher list", [
-    async () => legacyRequest({ list: "all" }),
-    async () => hinataRequest("GET", `/api/jan${all ? "/list/all" : "/list"}`)
-  ]);
-}
-
-async function getUserName(usersData, id) {
-  try {
-    const name = await usersData?.getName?.(id);
-    return clean(name) || id;
-  } catch (_) {
-    return id;
-  }
-}
-
-function formatList(data, limit, usersData) {
-  const raw =
-    data?.data?.data ||
-    data?.data?.teacher?.teacherList ||
-    data?.teacher?.teacherList ||
-    data?.data ||
-    {};
-
-  let rows = [];
-  if (Array.isArray(raw)) {
-    rows = raw.map((item) => {
-      const id = Object.keys(item || {})[0];
-      return { id, count: Number(item?.[id]) || 0 };
-    }).filter((row) => row.id);
-  } else if (raw && typeof raw === "object") {
-    rows = Object.entries(raw).map(([id, count]) => ({
-      id,
-      count: Number(count) || 0
-    }));
-  }
-
-  rows.sort((a, b) => b.count - a.count);
-  return Promise.all(rows.slice(0, limit).map(async (row, index) => {
-    const name = await getUserName(usersData, row.id);
-    return `${index + 1}. ${name}: ${row.count}`;
-  }));
-}
-
-function findMentionPrefix(body) {
-  const source = clean(body);
-  const sorted = [...SETTINGS.aliases].sort((a, b) => b.length - a.length);
-  for (const alias of sorted) {
-    const regex = new RegExp(`^${escapeRegExp(alias)}(?:\\s+|$)`, "i");
-    const match = source.match(regex);
-    if (match) {
-      return {
-        alias,
-        text: source.slice(match[0].length).trim()
-      };
-    }
-  }
-  return null;
-}
-
-function mediaPrompt(event) {
-  const type = event?.attachments?.[0]?.type || "default";
-  return pick(MEDIA_MESSAGES[type] || MEDIA_MESSAGES.default);
-}
-
-async function handleCommand({ api, event, args, usersData }) {
-  const raw = clean(args.join(" "));
-  const command = lower(args[0]);
-  const userID = event.senderID;
-
-  if (!raw) {
-    return sendReply(api, event, pick(FALLBACK_MESSAGES));
-  }
-
-  if (command === "help") {
-    return sendReply(api, event, module.exports.config.guide.en);
-  }
-
-  if (command === "teach") {
-    const isReact = lower(args[1]) === "react";
-    const isIntro = lower(args[1]) === "amar" || lower(args[1]) === "intro";
-    const prefixLength = isReact || isIntro ? 2 : 1;
-    const input = args.slice(prefixLength).join(" ");
-    const pair = splitTeachInput(input);
-
-    if (!pair.left || !pair.right) {
-      return sendReply(
-        api,
-        event,
-        isReact
-          ? "❌ ব্যবহার: teach react <question> - <reaction1>, <reaction2>"
-          : "❌ ব্যবহার: teach <question> - <reply1>, <reply2>"
-      );
-    }
-
-    const response = isReact
-      ? await teachReaction(pair.left, pair.right, userID, event.threadID)
-      : await teach(pair.left, pair.right, userID, event.threadID, isIntro);
-    const teacher = await getUserName(usersData, userID);
-    const count = response?.data?.count || response?.data?.teachs || response?.data?.teaches || "";
-
-    return sendReply(
-      api,
-      event,
-      `✅ শেখানো হয়েছে\n• প্রশ্ন: ${pair.left}\n• উত্তর: ${pair.right}\n• শিক্ষক: ${teacher}${count ? `\n• মোট শেখানো: ${count}` : ""}`
-    );
-  }
-
-  if (command === "remove" || command === "rm") {
-    const input = args.slice(1).join(" ");
-    const pair = splitTeachInput(input);
-    const index = command === "rm" ? Number(pair.right) : (pair.right && /^\d+$/.test(pair.right) ? Number(pair.right) : null);
-
-    if (!pair.left || (command === "rm" && !Number.isInteger(index))) {
-      return sendReply(api, event, "❌ ব্যবহার: remove <question> অথবা rm <question> - <index>");
-    }
-
-    const response = await removeReply(pair.left, index, userID);
-    return sendReply(api, event, extractText(response.data) || "✅ উত্তরটি সরানো হয়েছে।");
-  }
-
-  if (command === "edit") {
-    const pair = splitTeachInput(args.slice(1).join(" "));
-    if (!pair.left || !pair.right) {
-      return sendReply(api, event, "❌ ব্যবহার: edit <question> - <new reply>");
-    }
-
-    const response = await editReply(pair.left, pair.right, userID);
-    return sendReply(api, event, extractText(response.data) || `✅ “${pair.left}” আপডেট করা হয়েছে।`);
-  }
-
-  if (command === "msg") {
-    const trigger = args.slice(1).join(" ");
-    if (!trigger) return sendReply(api, event, "❌ যে প্রশ্নটি খুঁজবেন সেটি লিখুন।");
-
-    const response = await lookupMessage(trigger);
-    return sendReply(api, event, extractText(response.data) || "কোনো উত্তর পাওয়া যায়নি।");
-  }
-
-  if (command === "list") {
-    const all = lower(args[1]) === "all";
-    const limit = Math.min(Math.max(Number(args[2]) || SETTINGS.maxTeacherRows, 1), SETTINGS.maxTeacherRows);
-    const response = await getList(all);
-
-    if (!all) {
-      return sendReply(
-        api,
-        event,
-        extractText(response.data) ||
-          `📚 মোট শেখানো: ${response.data?.length || response.data?.count || "অজানা"}`
-      );
-    }
-
-    const rows = await formatList(response.data, limit, usersData);
-    return sendReply(
-      api,
-      event,
-      rows.length
-        ? `🏆 Baby teachers (top ${rows.length})\n\n${rows.join("\n")}`
-        : "কোনো teacher তথ্য পাওয়া যায়নি।"
-    );
-  }
-
-  const localReaction = getLocalReaction(raw);
-  if (localReaction) react(api, event, localReaction);
-  const response = await getBotResponse(raw, event.attachments || [], userID, event.threadID);
-  rememberConversation(event.threadID, userID, raw, response);
-  return sendReply(api, event, response);
-}
-
-module.exports.onStart = async (context) => {
-  const { api, event } = context;
-  if (!claimEvent(event)) return;
-  if (!checkCooldown(event, "command")) return;
-
-  try {
-    react(api, event);
-    typing(api, event);
-    await handleCommand(context);
-  } catch (error) {
-    console.error("[bby:onStart]", error);
-    await sendReply(api, event, `❌ Baby API error: ${asError(error)}`);
-  } finally {
-    typing(api, event, false);
-  }
+   }
+  }, event.messageID);
+ }
+
+ const senderName = await Users.getName(event.senderID);
+ const replyText = event.body ? event.body.toLowerCase() : "";
+ if (!replyText) return;
+ const simsim = await getMainAPI();
+ const res = await axios.get(`${simsim}/simsimi?text=${encodeURIComponent(replyText)}&senderName=${encodeURIComponent(senderName)}`);
+ const replies = Array.isArray(res.data.response) ? res.data.response : [res.data.response];
+
+ for (const rep of replies) {
+ await new Promise(resolve => {
+ api.sendMessage(rep, event.threadID, (err, info) => {
+ if (!err) {
+ global.GoatBot.onReply.set(info.messageID, {
+ commandName: module.exports.config.name,
+ messageID: info.messageID,
+ author: event.senderID,
+ type: "simsimi"
+ });
+ }
+ resolve();
+ }, event.messageID);
+ });
+ }
+
+ } catch (err) {
+ return api.sendMessage(`Error: ${err.message}`, event.threadID, event.messageID);
+ }
 };
 
-module.exports.onReply = async ({ api, event }) => {
-  if (!event.messageReply && event.type !== "message_reply") return;
-  if (!claimEvent(event)) return;
-  if (!checkCooldown(event, "reply")) return;
-
-  try {
-    react(api, event);
-    typing(api, event);
-    const text = clean(event.body) || mediaPrompt(event);
-    const localReaction = getLocalReaction(text);
-    if (localReaction) react(api, event, localReaction);
-    const response = await getBotResponse(text, event.attachments || [], event.senderID, event.threadID);
-    rememberConversation(event.threadID, event.senderID, text, response);
-    await sendReply(api, event, response);
-  } catch (error) {
-    console.error("[bby:onReply]", error);
-    await sendReply(api, event, `❌ Baby API error: ${asError(error)}`);
-  } finally {
-    typing(api, event, false);
-  }
-};
-
-module.exports.onChat = async ({ api, event }) => {
-  if (event.type === "message_reply") return;
-  if (!claimEvent(event)) return;
-
-  const mention = findMentionPrefix(event.body);
-  if (!mention) return;
-  if (!checkCooldown(event, "chat")) return;
-
-  try {
-    react(api, event);
-    typing(api, event);
-
-    if (!mention.text && !(event.attachments || []).length) {
-      await sendReply(api, event, pick(FALLBACK_MESSAGES));
-      return;
+module.exports.onChat = async ({ api, event, message }) => {
+ try {
+  const body = event.body ? event.body.toLowerCase() : "";
+  if (event.type !== "message_reply" && arafat.some(word => body.startsWith(word))) {
+   api.setMessageReaction("🪽", event.messageID, () => {}, true);
+   api.sendTypingIndicator(event.threadID, true);
+   const arr = (() => {
+    for (const prefix of arafat) {
+     if (body.startsWith(prefix)) return body.substring(prefix.length).trim();
     }
+    return "";
+   })();
+   const randomReplies = [
+        "babu khuda lagse🥺",
+          "Hop beda😾,Boss বল boss😼",  
+          "আমাকে ডাকলে ,আমি কিন্তূ কিস করে দেবো 😘 ",  
+          "🐒🐒🐒",
+          "bye",
+          "naw amr boss k message daw https://www.facebook.com/profile.php?id=61576355017916",
+          "mb nei bye",
+          "meww",
+          "গোলাপ ফুল এর জায়গায় আমি দিলাম তোমায় মেসেজ 😘",
+          "বলো কি বলবা, সবার সামনে বলবা নাকি?🤭🤏",  
+          "𝗜 𝗹𝗼𝘃𝗲 𝘆𝗼𝘂__😘😘",
+          "𝗜 𝗵𝗮𝘁𝗲 𝘆𝗼𝘂__😏😏",
+          "গোসল করে আসো যাও😑😩",
+          "আসসালামু আলাইকুম",
+          "কেমন আছো_🥹",
+          "বলেন sir__😌",
+          "বলেন ম্যাডাম__😌",
+          "আমি অন্যের জিনিসের সাথে কথা বলি না__😏ওকে",
+          "🙂🙂🙂",
+          "এটাই দেখার বাকি ছিলো_🙂🙂🙂",
+          "𝗕𝗯𝘆 𝗯𝗼𝗹𝗹𝗮 𝗽𝗮𝗽 𝗵𝗼𝗶𝗯𝗼 😒😒",
+          "𝗧𝗮𝗿𝗽𝗼𝗿 𝗯𝗼𝗹𝗼_🙂",
+          "𝗕𝗲𝘀𝗵𝗶 𝗱𝗮𝗸𝗹𝗲 𝗮𝗺𝗺𝘂 𝗯𝗼𝗸𝗮 𝗱𝗶𝗯𝗲 𝘁𝗼__🥺",
+          "𝗕𝗯𝘆 না জানু, বল 😌",
+          "বেশি bby bby করলে leave নিবো কিন্তু 😒😒",
+          "__বেশি বেবি বললে কামুর দিমু 🤭🤭",
+          "𝙏𝙪𝙢𝙖𝙧 𝙜𝙛 𝙣𝙖𝙞, 𝙩𝙖𝙞 𝙖𝙢𝙖𝙠𝗲 𝙙𝙖𝙠𝙨𝙤? 😂😂😂",
+          "bolo baby😒",
+          "তোর কথা তোর বাড়ি কেউ শুনে না ,তো আমি কোনো শুনবো ?🤔😂",
+          "আমি তো অন্ধ কিছু দেখি না🐸 😎",
+          "আম গাছে আম নাই ঢিল কেন মারো, তোমার সাথে প্রেম নাই বেবি কেন ডাকো 😒🫣",
+          "𝗼𝗶𝗶 ঘুমানোর আগে.! তোমার মনটা কোথায় রেখে ঘুমাও.!🤔_নাহ মানে চুরি করতাম 😞😘",
+          "𝗕𝗯𝘆 না বলে 𝗕𝗼𝘄 বলো 😘",
+          "দূরে যা, তোর কোনো কাজ নাই, শুধু 𝗯𝗯𝘆 𝗯𝗯𝘆 করিস  😉😋🤣",
+          "এই এই তোর পরীক্ষা কবে? শুধু 𝗕𝗯𝘆 𝗯𝗯𝘆 করিস 😾",
+          "তোরা যে হারে 𝗕𝗯𝘆 ডাকছিস আমি তো সত্যি বাচ্চা হয়ে যাবো_☹😑",
+          "আজব তো__😒",
+          "আমাকে ডেকো না,আমি ব্যাস্ত আছি🙆🏻‍♀",
+          "𝗕𝗯𝘆 বললে চাকরি থাকবে না",
+          "𝗕𝗯𝘆 𝗕𝗯𝘆 না করে আমার বস মানে, JABED ও তো করতে পারো😑?",
+          "আমার সোনার বাংলা, তারপরের লাইন কি? 🙈",
+          "🍺 এই নাও জুস খাও..!𝗕𝗯𝘆 বলতে বলতে হাপায় গেছো না 🥲",
+          "হটাৎ আমাকে মনে পড়লো 🙄",
+          "𝗕𝗯𝘆 বলে অসম্মান করতেছিস,😰😿",
+          "𝗔𝘀𝘀𝗮𝗹𝗮𝗺𝘂𝗹𝗮𝗶𝗸𝘂𝗺 🐤🐤",
+          "আমি তোমার সিনিয়র আপু ওকে 😼সম্মান দেও🙁",
+          "খাওয়া দাওয়া করছো?🙄",
+          "এত কাছেও এসো না,প্রেম এ পরে যাবো তো 🙈",
+          "আরে আমি মজা করার mood এ নাই😒",
+          "𝗛𝗲𝘆 𝗛𝗮𝗻𝗱𝘀𝗼𝗺𝗲 বলো 😁😁",
+          "আরে Bolo আমার জান, কেমন আছো? 😚",
+          "একটা BF খুঁজে দাও 😿",
+          "ফ্রেন্ড রিকোয়েস্ট দিলে ৫ টাকা দিবো 😗",
+          "oi mama ar dakis na pilis 😿",
+          "🐤🐤",
+          "__ভালো হয়ে  যাও 😑😒",
+          "এমবি কিনে দাও না_🥺🥺",
+          "ওই মামা_আর ডাকিস না প্লিজ😫",
+          "৩২ তারিখ আমার বিয়ে 🐤",
+          "হা বলো😒,কি করতে পারি😐😑?",
+          "বলো ফুলটুশি_😘",
+          "amr JaNu lagbe,Tumi ki single aso?🥹",
+          "আমাকে না ডেকে একটু পড়তেও বসতে তো পারো 😒😒",
+          "তোর বিয়ে হয় নি 𝗕𝗯𝘆 হইলো কিভাবে,,🙄",
+          "আজ একটা ফোন নাই বলে রিপ্লাই দিতে পারলাম না_🙄",
+          "চৌধুরী সাহেব আমি গরিব হতে পারি😾🤭 -কিন্তু বড়লোক না🥹 😫",
+          "আমি অন্যের জিনিসের সাথে কথা বলি না__😏ওকে",
+          "বলো কি বলবা, সবার সামনে বলবা নাকি?🤭🤏",
+          "ভুলে যাও আমাকে 😞😞",
+          "দেখা হলে কাঠগোলাপ দিও..🤗",
+          "শুনবো না😼 তুমি আমাকে প্রেম করাই দাও নি🥺 পচা তুমি🥺",
+          "আগে একটা গান বলো, ☹ নাহলে কথা বলবো না 🥺",
+          "বলো কি করতে পারি তোমার জন্য 😚",
+          "কথা দেও আমাকে পটাবা...!! 😌",
+          "বার বার Disturb করেতেছিস কোনো 😾, আমার জানু এর সাথে ব্যাস্ত আছি😋",
+          "আমাকে না ডেকে একটু পড়তে বসতেও তো পারো 🥺🥺",
+          "বার বার ডাকলে মাথা গরম হয় কিন্তু 😑😒",
+          "ওই তুমি single না?🫵🤨 😑😒",
+          "বলো জানু 😒",
+          "Meow🐤",     
+          "আর কত বার ডাকবা ,শুনছি তো 🤷🏻‍♀",
+          "কি হলো, মিস টিস করতেছিস নাকি 🤣",
+          "Bolo Babu, তুমি কি আমাকে ভালোবাসো? 🙈",
+          "আজকে আমার mন ভালো নেই 🙉",
+          "আমি হাজারো মশার Crush😓",
+          "প্রেম করার বয়সে লেখাপড়া করতেছি, রেজাল্ট তো খা/রা'প হবেই.!🙂",
+          "আমার ইয়ারফোন চু'রি হয়ে গিয়েছে!! কিন্তু চোর'কে গা-লি দিলে আমার বন্ধু রেগে যায়!'🙂",
+          "ছেলেদের প্রতি আমার এক আকাশ পরিমান শরম🥹🫣",
+          "__ফ্রী ফে'সবুক চালাই কা'রন ছেলেদের মুখ দেখা হারাম 😌",
+          "মন সুন্দর বানাও মুখের জন্য তো 'Snapchat' আছেই! 🌚"
+      ];
 
-    const input = mention.text || mediaPrompt(event);
-    const localReaction = getLocalReaction(input);
-    if (localReaction) react(api, event, localReaction);
-    const response = await getBotResponse(input, event.attachments || [], event.senderID, event.threadID);
-    rememberConversation(event.threadID, event.senderID, input, response);
-    await sendReply(api, event, response);
-  } catch (error) {
-    console.error("[bby:onChat]", error);
-    await sendReply(api, event, `❌ Baby API error: ${asError(error)}`);
-  } finally {
-    typing(api, event, false);
+   if (!arr) {
+    return await api.sendMessage(randomReplies[Math.floor(Math.random() * randomReplies.length)], event.threadID, (err, info) => {
+     if (!err && info) {
+      global.GoatBot.onReply.set(info.messageID, {
+       commandName: module.exports.config.name,
+       type: "reply",
+       messageID: info.messageID,
+       author: event.senderID
+      });
+     }
+    }, event.messageID);
+   }
+   const simsim = await getMainAPI();
+   const res = await axios.get(`${simsim}/simsimi?text=${encodeURIComponent(arr)}`);
+   const replies = Array.isArray(res.data.response) ? res.data.response : [res.data.response];
+   for (const rep of replies) {
+    await new Promise(resolve => {
+     api.sendMessage(rep, event.threadID, (err, info) => {
+      if (!err && info) {
+       global.GoatBot.onReply.set(info.messageID, {
+        commandName: module.exports.config.name,
+        type: "reply",
+        messageID: info.messageID,
+        author: event.senderID
+       });
+      }
+      resolve();
+     }, event.messageID);
+    });
+   }
   }
+ } catch (err) {
+  return api.sendMessage(`Error: ${err.message}`, event.threadID, event.messageID);
+ }
 };
