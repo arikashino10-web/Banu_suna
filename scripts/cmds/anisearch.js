@@ -23,7 +23,7 @@ module.exports = {
     name: "anisearch",
     aliases: ["anisr"],
     version: "1.3.2",
-    author: "Arafat",
+    author: "JABED VAO",
     countDown: 5,
     role: 0,
     description: "Anime edits from TikTok",
@@ -46,7 +46,7 @@ module.exports = {
     try {
       const searchTerms = `${query} anime edit amv no watermark`;
 
-      const res = await axios.get(`https://azadx69x-tiktok-api.vercel.app/tiktok/search`, {
+      const res = await axios.get(`https://jabed-youtube-music-api-2.onrender.com/youtube/search`, {
         params: { query: searchTerms },
         timeout: 15000
       });
