@@ -12,8 +12,8 @@ const REACT = {
 	error: "❌",
 };
 
-const AUDIO_API = "https://yt-song-api.vercel.app/api/song";
-const VIDEO_API = "https://video-dl-api-tan.vercel.app";
+const AUDIO_API = "https://jabed-youtube-music-api-2.onrender.com";
+const VIDEO_API = "https://jabed-youtube-music-api-2.onrender.com";
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const VIDEO_QUALITY = "720";
 
@@ -69,7 +69,7 @@ module.exports = {
 		name: "sing",
 		aliases: ["music", "play"],
 		version: "2.1.1",
-		author: "Arafat",
+		author: "JABED VAO",
 		countDown: 10,
 		role: 0,
 		description: {
